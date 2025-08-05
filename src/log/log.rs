@@ -1,78 +1,81 @@
+use crate::log::cmd::Commmand;
 use std::collections::vec_deque;
+use std::process::Command;
 use std::sync::Arc;
 use std::{
     collections::VecDeque,
     sync::{atomic::AtomicU64, atomic::Ordering, Mutex},
 };
 
+use super::cmd;
+
 struct log {
     inner: Arc<Mutex<SharedLog>>,
 }
 struct SharedLog {
     entries: VecDeque<LogEntry>,
-    commit_index: AtomicU64,
-    last_applied: AtomicU64,
+    commit_index: u64,
+    last_applied: u64,
 }
 
 struct LogEntry {
-    term: AtomicU64,
-    record: Record,
-}
-
-struct Record {
-    key: String,
-    value: String,
-}
-
-impl Record {
-    fn new() -> Record {
-        Record {
-            key: String::new(),
-            value: String::new(),
-        }
-    }
-
-    fn key(&self) -> &str {
-        &self.key
-    }
-    fn value(&self) -> &str {
-        &self.value
-    }
+    term: u64,
+    command: Commmand,
 }
 
 impl LogEntry {
-    fn new() -> LogEntry {
-        LogEntry {
-            term: AtomicU64::new(0),
-            record: Record::new(),
+    pub fn new() -> Self {
+        Self {
+            term: 1,
+            command: Commmand::new(),
         }
     }
 
-    fn next_id(&self) -> u64 {
-        self.term.fetch_add(1, Ordering::Relaxed)
+    pub fn entry(&mut self, cmd: Commmand) -> Self {
+        Self {
+            term: self.term,
+            command: cmd,
+        }
+    }
+    pub fn new_set(term: u64, key: impl ToString, value: impl ToString) -> Self {
+        Self {
+            term: term,
+            command: Commmand::new_set(key, value),
+        }
     }
 }
 
 impl SharedLog {
-    fn new() -> SharedLog {
+    pub fn new() -> SharedLog {
         SharedLog {
             entries: VecDeque::new(),
-            commit_index: AtomicU64::new(0),
-            last_applied: AtomicU64::new(0),
+            commit_index: 0,
+            last_applied: 0,
         }
     }
 
-    fn inc_commit_index(&self) -> u64 {
-        self.commit_index.fetch_add(1, Ordering::Relaxed)
-    }
-    fn inc_last_applied(&self) -> u64 {
-        self.last_applied.fetch_add(1, Ordering::Relaxed)
+    pub fn new_log(&mut self, entry: LogEntry) {
+        self.entries.push_back(entry);
     }
 
-    fn insert(&mut self, value: LogEntry) {
-        self.entries.push_back(value);
+    pub fn push_back(&mut self, entry: LogEntry) {
+        self.entries.push_back(entry);
     }
-    fn append(&mut self, mut entries: VecDeque<LogEntry>) {
-        self.entries.append(&mut entries);
+    pub fn pop_front(&mut self) {
+        self.entries.pop_front();
+    }
+}
+
+impl log {
+    pub fn new() -> Self {
+        let shared_log = SharedLog::new();
+        Self {
+            inner: Arc::new(Mutex::new(shared_log)),
+        }
+    }
+
+    pub fn new_log(&mut self, entry: LogEntry) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.new_log(entry);
     }
 }

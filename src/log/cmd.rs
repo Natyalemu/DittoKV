@@ -1,22 +1,39 @@
 type Key = String;
 type Value = String;
 
-enum Command {
+pub enum Commmand {
+    None,
     set(Set),
     delete(Delete),
 }
-
-struct Set {
-    key: Key,
-    value: Value,
+pub struct Set {
+    pub key: Key,
+    pub value: Value,
 }
 
 struct Delete {
     key: Value,
 }
+impl Commmand {
+    pub fn new() -> Self {
+        Commmand::None
+    }
+    pub fn new_set(key: impl ToString, value: impl ToString) -> Self {
+        Commmand::set(Set {
+            key: key.to_string(),
+            value: value.to_string(),
+        })
+    }
+
+    pub fn new_delete(key: impl ToString) -> Self {
+        Commmand::delete(Delete {
+            key: key.to_string(),
+        })
+    }
+}
 
 impl Set {
-    fn new(key: impl ToString, value: impl ToString) -> Set {
+    pub fn new(key: impl ToString, value: impl ToString) -> Set {
         Set {
             key: key.to_string(),
             value: value.to_string(),
@@ -26,7 +43,7 @@ impl Set {
     fn key(&self) -> String {
         self.key.clone()
     }
-    fn value(&self) -> String {
+    pub fn value(&self) -> String {
         self.value.clone()
     }
 }
@@ -38,7 +55,7 @@ impl Delete {
         }
     }
 
-    fn key(&self) -> &str {
+    pub fn key(&self) -> &str {
         &self.key
     }
 }
