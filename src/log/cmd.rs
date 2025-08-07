@@ -1,3 +1,4 @@
+use std::clone;
 type Key = String;
 type Value = String;
 
@@ -11,8 +12,23 @@ pub struct Set {
     pub value: Value,
 }
 
-struct Delete {
-    key: Value,
+pub struct Delete {
+    pub key: Value,
+}
+impl clone::Clone for Delete {
+    fn clone(&self) -> Self {
+        Delete {
+            key: self.key.clone(),
+        }
+    }
+}
+impl clone::Clone for Set {
+    fn clone(&self) -> Self {
+        Set {
+            key: self.key.clone(),
+            value: self.value.clone(),
+        }
+    }
 }
 impl Commmand {
     pub fn new() -> Self {
