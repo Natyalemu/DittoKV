@@ -41,8 +41,8 @@ impl<'a> StateMachine<'a> {
     // Consumes a LogEntry and processes the command
     fn process(&mut self, log_entry: LogEntry) {
         match log_entry.command {
-            Commmand::delete(Delete) => {
-                self.key_value.remove(&Delete.key);
+            Commmand::delete(delete) => {
+                self.key_value.remove(&delete.key);
             }
             Commmand::set(set) => {
                 self.key_value.insert(set.key, set.value);
