@@ -6,7 +6,6 @@ use std::sync::atomic::Ordering;
 //2) If commit_index > last applied pass the command to the state machine
 //note: whether to use atomic types at the outer log or lock to check the log commit_index and
 //last_applied should be consider and benchmarked
-//
 struct StateMachine<'a> {
     log: &'a mut Log,
 

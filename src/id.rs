@@ -1,11 +1,22 @@
-use std::ops;
+use core::fmt;
+use serde::{Deserialize, Serialize};
+use std::{fmt::Formatter, ops};
 
+use crate::error::Error;
+
+#[derive(Deserialize, Serialize)]
 pub struct Id(u64);
 
 impl Id {
     fn new(id: impl Into<u64>) -> Self {
         let id = id.into();
         Id(id)
+    }
+}
+impl fmt::Debug for Id {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Id").field("NewType", &self.0);
+        Ok(())
     }
 }
 

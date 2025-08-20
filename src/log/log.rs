@@ -1,4 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 use crate::log::cmd::Commmand;
+use core::fmt;
 use std::clone;
 use std::collections::vec_deque;
 use std::process::Command;
@@ -20,7 +23,7 @@ pub struct SharedLog {
     pub commit_index: u64,
     pub last_applied: u64,
 }
-
+#[derive(Deserialize, Serialize)]
 pub struct LogEntry {
     pub term: u64,
     pub command: Commmand,
@@ -51,6 +54,14 @@ impl clone::Clone for LogEntry {
                 command: Commmand::None,
             },
         }
+    }
+}
+impl fmt::Debug for LogEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LogEntry")
+            .field("temr", &self.term)
+            .field("Commmand", &self.command);
+        Ok(())
     }
 }
 

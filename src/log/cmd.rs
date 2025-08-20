@@ -1,17 +1,21 @@
 use std::clone;
+
+use serde::{Deserialize, Serialize};
 type Key = String;
 type Value = String;
 
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Commmand {
     None,
     set(Set),
     delete(Delete),
 }
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Set {
     pub key: Key,
     pub value: Value,
 }
-
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Delete {
     pub key: Value,
 }
