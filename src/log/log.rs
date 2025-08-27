@@ -91,8 +91,8 @@ impl SharedLog {
     pub fn new() -> SharedLog {
         SharedLog {
             entries: VecDeque::new(),
-            commit_index: 0,
-            last_applied: 0,
+            commit_index: 1,
+            last_applied: 1,
         }
     }
 
@@ -127,6 +127,8 @@ impl Log {
     pub fn new_log(&mut self, entry: LogEntry) {
         let mut guard = self.inner.lock().unwrap();
         guard.new_log(entry);
+        drop(guard);
+        self.increment_atomic_commit_index();
     }
 
     pub fn increment_atomic_commit_index(&mut self) {
