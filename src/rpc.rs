@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 //This should be updated so that the AppendEntryRequest transports number of LogEntry for efficient
 //communication between leader and followers
 #[derive(Debug, Serialize, Deserialize)]
-struct AppendEntryRequest {
+pub struct AppendEntryRequest {
     pub term: u64,
     pub leader_id: Id,
     pub prev_log_index: u64,
@@ -13,19 +13,19 @@ struct AppendEntryRequest {
     pub leader_commit: u64,
 }
 #[derive(Debug, Serialize, Deserialize)]
-struct AppendEntryResponse {
+pub struct AppendEntryResponse {
     pub term: u64,
     pub success: bool,
 }
 #[derive(Debug, Serialize, Deserialize)]
-struct RequestVoteRequest {
+pub struct RequestVoteRequest {
     pub term: u64,
     pub candidate_id: Id,
     pub last_login_index: u64,
     pub last_log_term: u64,
 }
 #[derive(Debug, Serialize, Deserialize)]
-struct RequestVoteResponse {
+pub struct RequestVoteResponse {
     pub term: u64,
     pub vote_granted: bool,
 }

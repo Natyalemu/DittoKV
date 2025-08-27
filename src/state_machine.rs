@@ -6,22 +6,23 @@ use std::sync::atomic::Ordering;
 //2) If commit_index > last applied pass the command to the state machine
 //note: whether to use atomic types at the outer log or lock to check the log commit_index and
 //last_applied should be consider and benchmarked
-struct StateMachine<'a> {
-    log: &'a mut Log,
+//
+pub struct StateMachine {
+    log: Log,
 
     key_value: BTreeMap<String, String>,
 }
 
-impl<'a> StateMachine<'a> {
-    fn new(log: &'a mut Log) -> Self {
+impl StateMachine {
+    pub fn new() -> Self {
         Self {
-            log: log,
+            log: Log::new(),
             key_value: BTreeMap::new(),
         }
     }
     // Loop over the log to process the remaining entries
 
-    fn store(&mut self) {
+    pub fn store(&mut self) {
         loop {
             if self.log.atomic_commit_index.load(Ordering::Acquire)
                 > self.log.atomic_last_applied.load(Ordering::Acquire)
@@ -34,11 +35,16 @@ impl<'a> StateMachine<'a> {
                 let log_entry = self.log.inner.lock().unwrap().entries[last_applied].clone();
                 self.process(log_entry);
             }
+            if self.log.atomic_commit_index.load(Ordering::Acquire)
+                == self.log.atomic_last_applied.load(Ordering::Acquire)
+            {
+                return;
+            }
         }
     }
 
     // Consumes a LogEntry and processes the command
-    fn process(&mut self, log_entry: LogEntry) {
+    pub fn process(&mut self, log_entry: LogEntry) {
         match log_entry.command {
             Commmand::delete(delete) => {
                 self.key_value.remove(&delete.key);
@@ -50,5 +56,8 @@ impl<'a> StateMachine<'a> {
                 return;
             }
         }
+    }
+    pub fn log(&mut self, log_entry: LogEntry) {
+        self.log.new_log(log_entry);
     }
 }

@@ -5,4 +5,5 @@ pub mod log;
 pub mod peer;
 pub mod role;
 pub mod rpc;
+pub mod server;
 pub mod state_machine;
