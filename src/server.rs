@@ -58,14 +58,30 @@ impl Server {
 
     pub async fn run(&mut self) -> crate::error::Error {
         loop {
+            //Assumptions:
+            // 1) All members of the cluster are provided with each other’s addresses.
+            //    Therefore, each server will try to connect to these servers.
+            // 2) For each incoming client request, each server will spawn a new thread to handle the request.
+
             if self.role = Role::Follower {}
 
             if self.role = Role::Leader {}
             if self.role = Role::Candidate {}
         }
     }
+    //Helper function for filtering election requirement
 
-    pub fn elect(&mut self, vote_request: RequestVoteRequest) {
-        if self.term > vote_request.term && vote_request.last_log_term > self.term {}
+    pub fn elect(&mut self, vote_request: RequestVoteRequest) -> RequestVoteResponse {
+        if vote_request.last_log_term > self.term {
+            RequestVoteResponse {
+                term: vote_request.term,
+                vote_granted: true,
+            }
+        } else {
+            RequestVoteResponse {
+                term: vote_request.term,
+                vote_granted: false,
+            }
+        }
     }
 }
