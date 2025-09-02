@@ -2,7 +2,15 @@ use crate::{id::Id, log::log::LogEntry};
 use serde::{Deserialize, Serialize};
 
 //This should be updated so that the AppendEntryRequest transports number of LogEntry for efficient
-//communication between leader and followers
+//communication between leader and followers.
+enum RPC {
+    AppendEntryRequest(AppendEntryRequest),
+    AppendEntryResponse(AppendEntryResponse),
+    RequestVoteRequest(RequestVoteRequest),
+    RequestVoteResponse(RequestVoteResponse),
+    InstallSnapshotRequest(InstallSnapshotRequest),
+    InstallSnapshotResponse(InstallSnapshotResponse),
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppendEntryRequest {
     pub term: u64,
