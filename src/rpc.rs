@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 //This should be updated so that the AppendEntryRequest transports number of LogEntry for efficient
 //communication between leader and followers.
-enum RPC {
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RPC {
     AppendEntryRequest(AppendEntryRequest),
     AppendEntryResponse(AppendEntryResponse),
     RequestVoteRequest(RequestVoteRequest),
