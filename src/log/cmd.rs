@@ -1,6 +1,7 @@
 use std::clone;
 
 use serde::{Deserialize, Serialize};
+
 type Key = String;
 type Value = String;
 
@@ -19,6 +20,7 @@ pub struct Set {
 pub struct Delete {
     pub key: Value,
 }
+
 impl clone::Clone for Delete {
     fn clone(&self) -> Self {
         Delete {

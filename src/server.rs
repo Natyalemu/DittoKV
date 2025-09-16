@@ -1,15 +1,13 @@
-use std::net::{TcpListener, ToSocketAddrs};
-use std::string;
-
 use crate::error::Error;
 use crate::id::Id;
 use crate::log::{cmd, log};
 use crate::peer::{self, Peer};
 use crate::role::Role;
 use crate::rpc::*;
-use crate::rpc::*;
 use crate::state_machine::StateMachine;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -23,9 +21,10 @@ struct Server {
     listener: TcpListener,
     term: u64,
     role: Role,
-    client: Vec<TcpStream>,
+    client:Vec<TcpStream>,
+    last_Log__term: u64,
     voted: bool,
-    tx_to_peers: Vec<mpsc::Sender<RPC>>,
+    tx_to_peers: HashMap<u64, mpsc::Sender<RPC>>,
     rx_from_peers: mpsc::Receiver<(u64, RPC)>,
     tx_to_server: mpsc::Sender<(u64, RPC)>,
 }
@@ -60,7 +59,7 @@ impl Server {
             let stream = TcpStream::connect(peer.addr).await.unwrap();
             let (reader, writer) = stream.into_split();
             let (tx_to_peer, rx_from_server) = mpsc::channel::<RPC>(100);
-            self.tx_to_peers.push(tx_to_peer);
+            self.tx_to_peers.insert(peer.get_id(), tx_to_peer);
             let tx_to_server = self.tx_to_server.clone();
 
             let cloned_peer = Arc::clone(peer);
@@ -107,6 +106,33 @@ impl Server {
             }
         }
     }
+
+    pub async fn handle_follower(&mut self,peer_id:u64, rpc: RPC) {
+        //1)Handle follower receives an rpc from the peer task.
+        //2)Log change into the statemahcine.
+        //3)Browse through the Hasmap using the id sent by the peers task to find the
+        // respective sending channel then send AppendEntryResponse to peer task which is then
+        // handled properly by the task created.
+        match rpc {
+            RPC::AppendEntryRequest(req) => {
+                self.state_machine.log(req.entry);
+                if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
+                    let _ = peer_tx.send(RPC::AppendEntryResponse(AppendEntryResponse {
+                        term: self.term,
+                        success: true,}))
+                                .await;
+                        }
+                    }
+
+                    RPC::RequestVoteResponse(req){
+                        self.handle_request_vote(req);
+                        //1) 
+                    }
+                
+            
+        }
+    }
+
 }
 
 pub async fn peer_task(

@@ -21,6 +21,11 @@ pub struct AppendEntryRequest {
     pub entry: LogEntry,
     pub leader_commit: u64,
 }
+impl AppendEntryRequest {
+    pub fn get_entry(&self) -> LogEntry {
+        self.entry.clone()
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppendEntryResponse {
     pub term: u64,
