@@ -1,15 +1,8 @@
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::{error, net::ToSocketAddrs};
-
-// The main communciation line between nodes. The server will hold id and addrs of these peers to
-// communicate to the rest of the peers.
 use crate::id::{self, Id};
-use crate::rpc::RPC;
-use std::error::Error;
-use tokio::io::AsyncWriteExt;
+use std::clone::Clone;
 use tokio::net::TcpStream;
 
+#[derive(Clone)]
 pub struct Peer {
     pub id: Id,
     pub addr: String,
