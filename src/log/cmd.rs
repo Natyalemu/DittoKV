@@ -1,10 +1,11 @@
 use std::clone;
 
 use serde::{Deserialize, Serialize};
+
 type Key = String;
 type Value = String;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Commmand {
     None,
     set(Set),
@@ -19,6 +20,7 @@ pub struct Set {
 pub struct Delete {
     pub key: Value,
 }
+
 impl clone::Clone for Delete {
     fn clone(&self) -> Self {
         Delete {

@@ -4,13 +4,16 @@ use std::{fmt::Formatter, ops};
 
 use crate::error::Error;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id(u64);
 
 impl Id {
-    fn new(id: impl Into<u64>) -> Self {
+    pub fn new(id: impl Into<u64>) -> Self {
         let id = id.into();
         Id(id)
+    }
+    pub fn get_id(self) -> u64 {
+        self.0
     }
 }
 impl fmt::Debug for Id {

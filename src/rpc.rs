@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 //This should be updated so that the AppendEntryRequest transports number of LogEntry for efficient
 //communication between leader and followers.
-enum RPC {
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RPC {
     AppendEntryRequest(AppendEntryRequest),
     AppendEntryResponse(AppendEntryResponse),
     RequestVoteRequest(RequestVoteRequest),
@@ -20,6 +21,11 @@ pub struct AppendEntryRequest {
     pub entry: LogEntry,
     pub leader_commit: u64,
 }
+impl AppendEntryRequest {
+    pub fn get_entry(&self) -> LogEntry {
+        self.entry.clone()
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppendEntryResponse {
     pub term: u64,
@@ -29,7 +35,7 @@ pub struct AppendEntryResponse {
 pub struct RequestVoteRequest {
     pub term: u64,
     pub candidate_id: Id,
-    pub last_login_index: u64,
+    pub last_log_index: u64,
     pub last_log_term: u64,
 }
 #[derive(Debug, Serialize, Deserialize)]
