@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 type Key = String;
 type Value = String;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Commmand {
     None,
     set(Set),

@@ -35,7 +35,7 @@ pub struct AppendEntryResponse {
 pub struct RequestVoteRequest {
     pub term: u64,
     pub candidate_id: Id,
-    pub last_login_index: u64,
+    pub last_log_index: u64,
     pub last_log_term: u64,
 }
 #[derive(Debug, Serialize, Deserialize)]

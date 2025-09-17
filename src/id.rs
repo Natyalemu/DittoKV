@@ -4,7 +4,7 @@ use std::{fmt::Formatter, ops};
 
 use crate::error::Error;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id(u64);
 
 impl Id {

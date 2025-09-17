@@ -4,6 +4,8 @@ use crate::log::{cmd, log};
 use crate::peer::{self, Peer};
 use crate::role::Role;
 use crate::rpc::*;
+use crate::rpc::RPC;
+use crate::rpc::RequestVoteResponse;
 use crate::state_machine::StateMachine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -14,6 +16,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+
+
 struct Server {
     id: Id,
     state_machine: StateMachine,
@@ -22,8 +26,8 @@ struct Server {
     term: u64,
     role: Role,
     client:Vec<TcpStream>,
-    last_Log__term: u64,
-    voted: bool,
+    last_log_term: u64,
+    voted_for: Option<Id>,
     tx_to_peers: HashMap<u64, mpsc::Sender<RPC>>,
     rx_from_peers: mpsc::Receiver<(u64, RPC)>,
     tx_to_server: mpsc::Sender<(u64, RPC)>,
@@ -107,7 +111,7 @@ impl Server {
         }
     }
 
-    pub async fn handle_follower(&mut self,peer_id:u64, rpc: RPC) {
+    pub async fn handle_follower(&mut self,peer_id:u64, rpc: RPC)-> Result<(), Error> {
         //1)Handle follower receives an rpc from the peer task.
         //2)Log change into the statemahcine.
         //3)Browse through the Hasmap using the id sent by the peers task to find the
@@ -116,21 +120,80 @@ impl Server {
         match rpc {
             RPC::AppendEntryRequest(req) => {
                 self.state_machine.log(req.entry);
+                self.last_log_term;
                 if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
                     let _ = peer_tx.send(RPC::AppendEntryResponse(AppendEntryResponse {
                         term: self.term,
                         success: true,}))
                                 .await;
+                    Ok(())
                         }
+                else {
+                    Err(Error::FailedToGetTheKey)
+                }
+                
                     }
-
-                    RPC::RequestVoteResponse(req){
-                        self.handle_request_vote(req);
-                        //1) 
-                    }
+            RPC::RequestVoteResponse(req){
+                self.handle_request_vote(peer_id, req); }
                 
             
         }
+    }
+   pub async fn handle_request_vote(
+    &mut self,
+    peer_id: u64,
+    req: RequestVoteRequest,
+) -> Result<(), Error> {
+    // Step 1: Determine vote grant
+    let vote_granted = if req.term < self.term {
+        false
+    } else {
+        if req.term > self.term {
+            self.term = req.term;
+            self.voted_for = None;
+        }
+
+        if let Some(  voted_for) = self.voted_for.as_ref() {
+            if voted_for != &req.candidate_id {
+                false
+            } else {
+                true
+            }
+        } else {
+         
+            // check log freshness
+            let up_to_date = (req.last_log_term > self.last_log_term)
+                || (req.last_log_term == self.last_log_term
+                    && req.last_log_index >= self.state_machine.last_log_index());
+
+            if up_to_date {
+                self.voted_for = Some(req.candidate_id);
+                true
+            } else {
+                false
+            }
+        }
+    };
+
+    // Step 2: Send response over the peer channel
+    if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
+        let response = RPC::RequestVoteResponse(RequestVoteResponse {
+            term: self.term,
+            vote_granted,
+        });
+
+        peer_tx.send(response).await.map_err(|_| Error::FailedToSendRPC)?;
+        Ok(())
+    } else {
+        Err(Error::FailedToGetTheKey)
+    }
+}
+
+    
+
+
+    fn log_term(&mut self){
+        self.last_log_term = self.term;
     }
 
 }

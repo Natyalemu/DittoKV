@@ -9,7 +9,6 @@ use std::sync::atomic::Ordering;
 //
 pub struct StateMachine {
     log: Log,
-
     key_value: BTreeMap<String, String>,
 }
 
@@ -43,6 +42,15 @@ impl StateMachine {
         }
     }
 
+    pub fn ready_to_apply(&self) -> bool {
+        if self.log.atomic_commit_index.load(Ordering::Acquire)
+            > self.log.atomic_last_applied.load(Ordering::Acquire)
+        {
+            true;
+        }
+        return false;
+    }
+
     // Consumes a LogEntry and processes the command
     pub fn process(&mut self, log_entry: LogEntry) {
         match log_entry.command {
@@ -58,6 +66,12 @@ impl StateMachine {
         }
     }
     pub fn log(&mut self, log_entry: LogEntry) {
-        self.log.new_log(log_entry);
+        let _ = self.log.append_entry(log_entry);
+    }
+    pub fn last_log_index(&self) -> u64 {
+        if let Some(last_log_index) = self.log.last_log_index() {
+            return last_log_index;
+        }
+        return 0;
     }
 }
