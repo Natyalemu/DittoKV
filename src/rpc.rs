@@ -18,12 +18,16 @@ pub struct AppendEntryRequest {
     pub leader_id: Id,
     pub prev_log_index: u64,
     pub prev_log_term: u64,
-    pub entry: LogEntry,
+    pub entry: Option<LogEntry>,
     pub leader_commit: u64,
 }
 impl AppendEntryRequest {
-    pub fn get_entry(&self) -> LogEntry {
-        self.entry.clone()
+    pub fn get_entry(&self) -> Option<LogEntry> {
+        if let Some(log_entry) = &self.entry {
+            return Some(log_entry.clone());
+        } else {
+            return None;
+        }
     }
 }
 #[derive(Debug, Serialize, Deserialize)]

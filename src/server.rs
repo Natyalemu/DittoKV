@@ -7,15 +7,16 @@ use crate::rpc::RequestVoteResponse;
 use crate::rpc::RPC;
 use crate::rpc::*;
 use crate::state_machine::StateMachine;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-
 struct Server {
     id: Id,
     state_machine: StateMachine,
@@ -27,7 +28,7 @@ struct Server {
     last_log_term: u64,
     voted_for: Option<Id>,
     tx_to_peers: HashMap<u64, mpsc::Sender<RPC>>,
-    rx_from_peers: mpsc::Receiver<(u64, RPC)>,
+    rx_from_peers: Option<mpsc::Receiver<(u64, RPC)>>,
     tx_to_server: mpsc::Sender<(u64, RPC)>,
 }
 
@@ -49,65 +50,86 @@ impl Server {
     // 3) If the server is in the candidate state, it remains in this state until it receives votes from more than half of the peers,
     // or until a notification is received from a new leader.
 
-    pub async fn run(&mut self) -> crate::error::Error {
+    pub async fn run(&mut self) -> Result<(), crate::error::Error> {
         //Assumptions:
         // 1) All members of the cluster are provided with each other’s addresses.
-        //    Therefore, each server will try to connect to these servers.
-        // 2) For each incoming client request, each server will spawn a new thread to handle the request.
-        //
+        // 2)Therefore, each server will try to connect to these servers.
+        // 3) For each incoming client request, each server will spawn a new thread to handle the request.
 
-        let mut peers = self.peers.lock().unwrap();
-        for peer in peers.iter_mut() {
-            let stream = TcpStream::connect(peer.addr).await.unwrap();
-            let (reader, writer) = stream.into_split();
-            let (tx_to_peer, rx_from_server) = mpsc::channel::<RPC>(100);
-            self.tx_to_peers.insert(peer.get_id(), tx_to_peer);
+        let mut rx = self
+            .rx_from_peers
+            .take()
+            .expect("rx_from_peers must be Some when run() is called");
+
+        let peers_to_connect: Vec<Arc<Peer>> = {
+            let guard = self.peers.lock().unwrap();
+            guard.iter().cloned().collect()
+        };
+
+        for peer in peers_to_connect {
+            let addr = peer.addr.clone();
+            let peer_id = peer.id.clone().get_id();
             let tx_to_server = self.tx_to_server.clone();
 
-            let cloned_peer = Arc::clone(peer);
+            let (tx_to_peer, rx_from_server) = mpsc::channel::<RPC>(100);
+            self.tx_to_peers.insert(peer_id, tx_to_peer);
+
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (reader, writer) = stream.into_split();
+
             tokio::spawn(async move {
-                peer_task(
-                    cloned_peer.get_id(),
-                    reader,
-                    writer,
-                    tx_to_server,
-                    rx_from_server,
-                )
-                .await;
+                peer_task(peer_id, reader, writer, tx_to_server, rx_from_server).await;
             });
         }
+
         loop {
             match self.role {
                 Role::Follower => {
+                    let duration = self.random_election_timeout_duration();
+                    let timeout = tokio::time::sleep(duration);
+                    tokio::pin!(timeout);
+
                     tokio::select! {
-                        Some((peer_id, rpc)) = self.rx_from_peers.recv() => {
-                            self.handle_follower(peer_id, rpc).await;
+                        maybe = rx.recv() => {
+                            match maybe {
+                                Some((peer_id, rpc)) => {
+                                    self.handle_follower(peer_id, rpc).await?;
+                                }
+                                None => {
+                                    return Err(crate::error::Error::ChannelClosed);
+                                }
+                            }
                         }
-                        _ = self.election_timeout() => {
-                            self.become_candidate();
+
+                        _ = &mut timeout => {
+                            self.role = Role::Candidate;
                         }
                     }
                 }
-                Role::Candidate => { /* ... */ }
-                Role::Leader => { /* ... */ }
-            }
-        }
-    }
-    //Helper function for filtering election requirement
 
-    pub fn elect(&mut self, vote_request: RequestVoteRequest) -> RequestVoteResponse {
-        if vote_request.last_log_term > self.term {
-            RequestVoteResponse {
-                term: vote_request.term,
-                vote_granted: true,
-            }
-        } else {
-            RequestVoteResponse {
-                term: vote_request.term,
-                vote_granted: false,
+                Role::Candidate => {}
+
+                Role::Leader => {}
             }
         }
     }
+    fn random_election_timeout_duration(&self) -> Duration {
+        let ms = rand::thread_rng().gen_range(150..=300);
+        Duration::from_millis(ms)
+    }
+
+    /// Listens to heartbeat sent by the leader and if the heartbea
+    pub async fn election_timeout(&mut self) {
+        todo!();
+    }
+    /// leader listens to client in one task and in the another send heartbeat to peers throught
+    /// channal, the peers peak up the heartbeat and send it to the respective node server throught
+    /// tcp stream. the hearbeat is just (). follower peer peak up the the hearbeat from the stream
+    /// and send it throught the channel to the server. by peer i mean the channel connection
+    /// between server on the device and the task that allows for communciation with other nodes.
+    /// The question is now how to seralize and deseralize the heartbeat(()) and is there any other
+    /// better ways of handling the situation. also keep in mind another channels have to be
+    /// created or the channel that are already being used sufficent for this communciation
 
     pub async fn handle_follower(&mut self, peer_id: u64, rpc: RPC) -> Result<(), Error> {
         //1)Handle follower receives an rpc from the peer task.
@@ -116,22 +138,25 @@ impl Server {
         // respective sending channel then send AppendEntryResponse to peer task which is then
         // handled properly by the task created.
         match rpc {
-            RPC::AppendEntryRequest(req) => {
-                self.state_machine.log(req.entry);
+            RPC::AppendEntryRequest(req) => match req.entry {
+                Some(entry) => {
+                    self.state_machine.log(entry);
 
-                if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
-                    peer_tx
-                        .send(RPC::AppendEntryResponse(AppendEntryResponse {
-                            term: self.term,
-                            success: true,
-                        }))
-                        .await
-                        .map_err(|_| Error::FailedToSendRPC)?;
-                    Ok(())
-                } else {
-                    Err(Error::FailedToGetTheKey)
+                    if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
+                        peer_tx
+                            .send(RPC::AppendEntryResponse(AppendEntryResponse {
+                                term: self.term,
+                                success: true,
+                            }))
+                            .await
+                            .map_err(|_| Error::FailedToSendRPC)?;
+                        Ok(())
+                    } else {
+                        Err(Error::FailedToGetTheKey)
+                    }
                 }
-            }
+                None => Ok(()),
+            },
 
             RPC::RequestVoteRequest(req) => self.handle_request_vote(peer_id, req).await,
 
@@ -143,7 +168,6 @@ impl Server {
         peer_id: u64,
         req: RequestVoteRequest,
     ) -> Result<(), Error> {
-        // Step 1: Determine vote grant
         let vote_granted = if req.term < self.term {
             false
         } else {
@@ -159,7 +183,6 @@ impl Server {
                     true
                 }
             } else {
-                // check log freshness
                 let up_to_date = (req.last_log_term > self.last_log_term)
                     || (req.last_log_term == self.last_log_term
                         && req.last_log_index >= self.state_machine.last_log_index());
@@ -173,7 +196,6 @@ impl Server {
             }
         };
 
-        // Step 2: Send response over the peer channel
         if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
             let response = RPC::RequestVoteResponse(RequestVoteResponse {
                 term: self.term,
