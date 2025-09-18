@@ -3,4 +3,5 @@ pub enum Error {
     FailedToGetTheKey,
     FailedToSendRPC,
     ChannelClosed,
+    SendError,
 }
