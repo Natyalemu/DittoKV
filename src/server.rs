@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::select;
 use tokio::sync::mpsc;
 struct Server {
     id: Id,
@@ -107,29 +108,92 @@ impl Server {
                     }
                 }
 
-                Role::Candidate => {}
+                Role::Candidate => {
+                    self.candidate_handler(&mut rx).await;
+                }
 
                 Role::Leader => {}
             }
         }
     }
+    async fn candidate_handler(
+        &mut self,
+        rx: &mut mpsc::Receiver<(u64, RPC)>,
+    ) -> Result<(), Error> {
+        loop {
+            let majority = (self.tx_to_peers.len() / 2) + 1;
+            self.term += 1;
+            self.voted_for = Some(self.id);
+            let mut votes: usize = 1;
+
+            let request_vote_request = RequestVoteRequest {
+                term: self.term,
+                candidate_id: self.id,
+                last_log_term: self.last_log_term,
+                last_log_index: self.state_machine.last_log_index(),
+            };
+
+            // send vote request to all peers
+            for (_, sender) in &self.tx_to_peers {
+                let _ = sender
+                    .send(RPC::RequestVoteRequest(request_vote_request.clone()))
+                    .await;
+            }
+
+            let mut timeout = tokio::time::sleep(self.random_election_timeout_duration());
+            tokio::pin!(timeout);
+
+            // wait for responses until either we win or timeout again
+            while votes < majority {
+                tokio::select! {
+                    maybe = rx.recv() => {
+                        match maybe {
+                            Some((_, rpc)) => {
+                                match rpc {
+                                    RPC::RequestVoteResponse(resp) => {
+                                        if resp.term > self.term {
+                                            // found newer term, step down
+                                            self.term = resp.term;
+                                            self.voted_for = None;
+                                            self.role = Role::Follower;
+                                            return Ok(());
+                                        }
+                                        if resp.vote_granted {
+                                            votes += 1;
+                                            if votes >= majority {
+                                                self.role = Role::Leader;
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                    RPC::AppendEntryRequest(areq) => {
+                                        // found valid leader
+                                        if areq.term >= self.term {
+                                            self.term = areq.term;
+                                            self.role = Role::Follower;
+                                            return Ok(());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            None => return Err(Error::ChannelClosed),
+                        }
+                    }
+
+                    _ = &mut timeout => {
+                        // election timed out: restart with a new term
+                        break; // exits inner loop, goes back to outer loop -> new election
+                    }
+                }
+            }
+        }
+    }
+
     fn random_election_timeout_duration(&self) -> Duration {
         let ms = rand::thread_rng().gen_range(150..=300);
         Duration::from_millis(ms)
     }
-
-    /// Listens to heartbeat sent by the leader and if the heartbea
-    pub async fn election_timeout(&mut self) {
-        todo!();
-    }
-    /// leader listens to client in one task and in the another send heartbeat to peers throught
-    /// channal, the peers peak up the heartbeat and send it to the respective node server throught
-    /// tcp stream. the hearbeat is just (). follower peer peak up the the hearbeat from the stream
-    /// and send it throught the channel to the server. by peer i mean the channel connection
-    /// between server on the device and the task that allows for communciation with other nodes.
-    /// The question is now how to seralize and deseralize the heartbeat(()) and is there any other
-    /// better ways of handling the situation. also keep in mind another channels have to be
-    /// created or the channel that are already being used sufficent for this communciation
 
     pub async fn handle_follower(&mut self, peer_id: u64, rpc: RPC) -> Result<(), Error> {
         //1)Handle follower receives an rpc from the peer task.
@@ -141,6 +205,7 @@ impl Server {
             RPC::AppendEntryRequest(req) => match req.entry {
                 Some(entry) => {
                     self.state_machine.log(entry);
+                    self.last_log_term = self.term;
 
                     if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
                         peer_tx
@@ -212,7 +277,7 @@ impl Server {
         }
     }
 
-    fn log_term(&mut self) {
+    pub fn log_term(&mut self) {
         self.last_log_term = self.term;
     }
 }
