@@ -6,7 +6,7 @@ use crate::role::Role;
 use crate::rpc::RequestVoteResponse;
 use crate::rpc::RPC;
 use crate::rpc::*;
-use crate::state_machine::StateMachine;
+use crate::state_machine::{StateMachine, StateMachineMsg};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,6 +31,8 @@ struct Server {
     last_log_term: u64,
     commit_index: u64,
     voted_for: Option<Id>,
+    // Handler to send signal for updating the state machine
+    tx_to_statemachine: Option<mpsc::Sender<StateMachineMsg>>,
     tx_to_peers: HashMap<u64, mpsc::Sender<RPC>>,
     rx_from_peers: Option<mpsc::Receiver<(u64, RPC)>>,
     tx_to_server: mpsc::Sender<(u64, RPC)>,
@@ -61,6 +63,16 @@ impl Server {
         // 1) All members of the cluster are provided with each other’s addresses.
         // 2)Therefore, each server will try to connect to these servers.
         // 3) For each incoming client request, each server will spawn a new thread to handle the request.
+        let (tx_to_state_machine, rx_from_log) = tokio::sync::mpsc::channel::<StateMachineMsg>(100);
+        self.tx_to_statemachine = Some(tx_to_state_machine);
+        let mut state_machine = Arc::clone(&self.state_machine);
+
+        tokio::spawn(async move {
+            Arc::get_mut(&mut state_machine)
+                .unwrap()
+                .state_machine_update(rx_from_log)
+                .await;
+        });
 
         let mut rx = self
             .rx_from_peers
@@ -120,7 +132,9 @@ impl Server {
                 }
 
                 Role::Leader => {
-                    self.leader_handler(&mut rx);
+                    if let Err(e) = self.leader_handler(&mut rx).await {
+                        return Err(e);
+                    }
                 }
             }
         }

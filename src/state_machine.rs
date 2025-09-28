@@ -1,7 +1,9 @@
+use crate::error::Error;
 use crate::log::cmd::{Commmand, Delete};
 use crate::log::log::{Log, LogEntry};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 //1) Locks on log
 //2) If commit_index > last applied pass the command to the state machine
 //note: whether to use atomic types at the outer log or lock to check the log commit_index and
@@ -10,6 +12,10 @@ use std::sync::atomic::Ordering;
 pub struct StateMachine {
     log: Log,
     key_value: BTreeMap<String, String>,
+}
+pub enum StateMachineMsg {
+    update,
+    shut_down,
 }
 
 impl StateMachine {
@@ -39,6 +45,30 @@ impl StateMachine {
             {
                 return;
             }
+        }
+    }
+    pub async fn state_machine_update(
+        &mut self,
+        mut rx: tokio::sync::mpsc::Receiver<StateMachineMsg>,
+    ) {
+        loop {
+            let recv = match rx.recv().await {
+                Some(msg) => match msg {
+                    StateMachineMsg::update => {
+                        self.store();
+                    }
+                    StateMachineMsg::shut_down => {
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
+                },
+
+                None => {
+                    continue;
+                }
+            };
         }
     }
 
