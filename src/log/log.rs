@@ -92,6 +92,11 @@ impl Log {
         }
     }
 
+    pub fn commit_index(&self) -> u64 {
+        let guard = self.inner.lock().unwrap();
+        guard.commit_index
+    }
+
     pub fn append_entry(&mut self, entry: LogEntry) -> u64 {
         let mut guard = self.inner.lock().unwrap();
         guard.push_back(entry);

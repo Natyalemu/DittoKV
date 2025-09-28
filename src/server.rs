@@ -17,6 +17,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::select;
+use tokio::time;
+
 use tokio::sync::mpsc;
 struct Server {
     id: Id,
@@ -27,10 +29,13 @@ struct Server {
     role: Role,
     client: Vec<TcpStream>,
     last_log_term: u64,
+    commit_index: u64,
     voted_for: Option<Id>,
     tx_to_peers: HashMap<u64, mpsc::Sender<RPC>>,
     rx_from_peers: Option<mpsc::Receiver<(u64, RPC)>>,
     tx_to_server: mpsc::Sender<(u64, RPC)>,
+    next_index: HashMap<u64, u64>,
+    match_index: HashMap<u64, u64>,
 }
 
 impl Server {
@@ -115,13 +120,208 @@ impl Server {
                 }
 
                 Role::Leader => {
-                    self.leader_handler();
+                    self.leader_handler(&mut rx);
+                }
+            }
+        }
+    }
+    //leader starts here
+    fn heartbeat_interval(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+
+    fn init_leader_state(&mut self) {
+        let last_index = self.state_machine.as_ref().last_log_index().unwrap_or(0);
+        self.commit_index = self.state_machine.commit_index();
+
+        self.next_index = self
+            .next_index
+            .clone()
+            .into_iter()
+            .collect::<HashMap<u64, u64>>();
+
+        for &peer_id in self.tx_to_peers.keys() {
+            self.next_index.insert(peer_id, last_index + 1);
+            self.match_index.insert(peer_id, 0);
+        }
+
+        self.match_index.insert(self.id.get_id(), last_index);
+    }
+
+    fn build_append_for_peer(&self, peer_id: u64) -> Option<AppendEntryRequest> {
+        let next_idx = *self.next_index.get(&peer_id)?;
+        let prev_index = next_idx.saturating_sub(1);
+        let prev_term = if prev_index == 0 {
+            0
+        } else {
+            self.state_machine.entry_term(prev_index).unwrap_or(0)
+        };
+
+        let entry = self.state_machine.get_entry(next_idx);
+
+        Some(AppendEntryRequest {
+            term: self.term,
+            leader_id: self.id,
+            prev_log_index: prev_index,
+            prev_log_term: prev_term,
+            entry, // Option<LogEntry> where None => heartbeat
+            leader_commit: self.commit_index,
+        })
+    }
+
+    fn try_advance_commit(&mut self) {
+        let mut match_indexes: Vec<u64> = self.match_index.values().copied().collect();
+
+        let leader_last = self.state_machine.last_log_index().unwrap_or(0);
+        match_indexes.push(leader_last);
+
+        match_indexes.sort_unstable_by(|a, b| b.cmp(a));
+
+        let majority_count = (self.tx_to_peers.len() + 1) / 2; // peers excludes leader
+        if majority_count >= match_indexes.len() {
+            return;
+        }
+        let candidate_n = match_indexes[majority_count];
+
+        if candidate_n > self.commit_index {
+            if let Some(term_at_n) = self.state_machine.entry_term(candidate_n) {
+                if term_at_n == self.term {
+                    self.commit_index = candidate_n;
+                    // update state machine's commit index / apply entries
+                    let _ = Arc::get_mut(&mut self.state_machine)
+                        .unwrap()
+                        .update_commit_index(self.commit_index);
                 }
             }
         }
     }
 
-    async fn leader_handler(&mut self) -> Result<(), Error> {}
+    /// Send either heartbeat (entry = None) or a real AppendEntryRequest to each follower,
+    /// using next_index to decide which entry to send.
+    async fn send_replication_round(&self) {
+        let term = self.term;
+        let leader_id = self.id;
+        let leader_commit = self.commit_index;
+        let prev_log_index = self.state_machine.last_log_index().unwrap_or(0);
+        let prev_log_term = self.state_machine.last_log_term().unwrap_or(0);
+
+        let mut work: Vec<(u64, mpsc::Sender<RPC>)> = Vec::with_capacity(self.tx_to_peers.len());
+        for (&pid, tx) in &self.tx_to_peers {
+            work.push((pid, tx.clone()));
+        }
+
+        for (pid, tx) in work {
+            let next_idx = self.next_index.get(&pid).copied().unwrap_or(1);
+            let last_idx = self.state_machine.last_log_index().unwrap_or(0);
+
+            let req = if next_idx <= last_idx {
+                self.build_append_for_peer(pid)
+                    .unwrap_or(AppendEntryRequest {
+                        term,
+                        leader_id,
+                        prev_log_index,
+                        prev_log_term,
+                        entry: None,
+                        leader_commit,
+                    })
+            } else {
+                AppendEntryRequest {
+                    term,
+                    leader_id,
+                    prev_log_index,
+                    prev_log_term,
+                    entry: None,
+                    leader_commit,
+                }
+            };
+
+            let _ = tx.send(RPC::AppendEntryRequest(req)).await;
+        }
+    }
+
+    /// Leader main loop. `rx` should be the receiver taken in `run()` and passed in.
+    pub async fn leader_handler(
+        &mut self,
+        rx: &mut mpsc::Receiver<(u64, RPC)>,
+    ) -> Result<(), Error> {
+        self.init_leader_state();
+        self.send_replication_round().await;
+
+        let mut ticker = time::interval(self.heartbeat_interval());
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                maybe = rx.recv() => {
+                    match maybe {
+                        Some((peer_id, rpc)) => {
+                            match rpc {
+                                RPC::AppendEntryResponse(resp) => {
+                                    if resp.term > self.term {
+                                        // step down
+                                        self.term = resp.term;
+                                        self.voted_for = None;
+                                        self.role = Role::Follower;
+                                        return Ok(());
+                                    }
+
+                                    if resp.success {
+                                        let ni = self.next_index.get(&peer_id).copied().unwrap_or(1);
+                                        let replicated_idx = ni.saturating_sub(1);
+                                        self.match_index.insert(peer_id, replicated_idx);
+                                        self.next_index.insert(peer_id, replicated_idx + 1);
+                                        self.try_advance_commit();
+                                    } else {
+                                        let ni = self.next_index.entry(peer_id).or_insert(1);
+                                        if *ni > 1 { *ni -= 1; } else { *ni = 1; }
+
+                                        if let Some(tx) = self.tx_to_peers.get(&peer_id) {
+                                            if let Some(req) = self.build_append_for_peer(peer_id) {
+                                                let _ = tx.send(RPC::AppendEntryRequest(req)).await;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RPC::RequestVoteRequest(req) => {
+                                    if req.term > self.term {
+                                        self.term = req.term;
+                                        self.voted_for = None;
+                                        self.role = Role::Follower;
+                                        return Ok(());
+                                    } else {
+                                        if let Some(tx) = self.tx_to_peers.get(&peer_id) {
+                                            let _ = tx.send(RPC::RequestVoteResponse(RequestVoteResponse {
+                                                term: self.term,
+                                                vote_granted: false,
+                                            })).await;
+                                        }
+                                    }
+                                }
+
+                                RPC::AppendEntryRequest(areq) => {
+                                    if areq.term > self.term {
+                                        self.term = areq.term;
+                                        self.voted_for = None;
+                                        self.role = Role::Follower;
+                                        return Ok(());
+                                    }
+                                }
+
+                                _ => { /* ignore */ }
+                            }
+                        }
+                        None => return Err(Error::ChannelClosed),
+                    }
+                }
+
+                _ = ticker.tick() => {
+                    self.send_replication_round().await;
+                }
+            }
+        }
+    }
+
     async fn candidate_handler(
         &mut self,
         rx: &mut mpsc::Receiver<(u64, RPC)>,
@@ -136,7 +336,7 @@ impl Server {
                 term: self.term,
                 candidate_id: self.id,
                 last_log_term: self.last_log_term,
-                last_log_index: self.state_machine.last_log_index(),
+                last_log_index: self.state_machine.as_ref().last_log_index().unwrap_or(0),
             };
 
             // send vote request to all peers
@@ -267,7 +467,8 @@ impl Server {
             } else {
                 let up_to_date = (req.last_log_term > self.last_log_term)
                     || (req.last_log_term == self.last_log_term
-                        && req.last_log_index >= self.state_machine.last_log_index());
+                        && req.last_log_index
+                            >= self.state_machine.as_ref().last_log_index().unwrap_or(0));
 
                 if up_to_date {
                     self.voted_for = Some(req.candidate_id);

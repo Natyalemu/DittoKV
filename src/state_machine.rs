@@ -41,12 +41,19 @@ impl StateMachine {
             }
         }
     }
+
     pub fn update_commit_index(&mut self, leader_commit_index: u64) {
         self.log.update_commit_index(leader_commit_index);
     }
     pub fn last_log_term(&self) -> Option<u64> {
         if let Some(last_log_term) = self.log.last_log_term() {
             return Some(last_log_term);
+        }
+        None
+    }
+    pub fn last_log_index(&self) -> Option<u64> {
+        if let Some(last_log_index) = self.log.last_log_index() {
+            return Some(last_log_index);
         }
         None
     }
@@ -74,13 +81,34 @@ impl StateMachine {
             }
         }
     }
+    pub fn commit_index(&self) -> u64 {
+        self.log.atomic_commit_index.load(Ordering::Acquire)
+    }
+
     pub fn log(&mut self, log_entry: LogEntry) {
         let _ = self.log.append_entry(log_entry);
     }
-    pub fn last_log_index(&self) -> u64 {
+    /*pub fn last_log_index(&self) -> u64 {
         if let Some(last_log_index) = self.log.last_log_index() {
             return last_log_index;
         }
         return 0;
+    }*/
+    pub fn entry_term(&self, index: u64) -> Option<u64> {
+        let guard = self.log.inner.lock().unwrap();
+
+        if index < self.log.log_base_index {
+            return None;
+        }
+        let idx = (index - self.log.log_base_index) as usize;
+        guard.entries.get(idx).map(|e| e.term)
+    }
+    pub fn get_entry(&self, index: u64) -> Option<LogEntry> {
+        let guard = self.log.inner.lock().unwrap();
+        if index < self.log.log_base_index {
+            return None;
+        }
+        let idx = (index - self.log.log_base_index) as usize;
+        guard.entries.get(idx).cloned()
     }
 }
