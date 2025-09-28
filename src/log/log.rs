@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-
 use crate::log::cmd::Commmand;
 use core::fmt;
+use serde::{Deserialize, Serialize};
 use std::clone;
+use std::cmp;
 use std::collections::vec_deque;
 use std::process::Command;
 use std::sync::Arc;
@@ -76,6 +76,21 @@ impl Log {
             atomic_last_applied: AtomicU64::new(0),
         }
     }
+    /// Tracks the commited log by comparing the leader's commited index and the server runnning on
+    /// the machine.
+    pub fn update_commit_index(&mut self, leader_commit_index: u64) {
+        let mut shared_log = self.inner.lock().unwrap();
+        let last_log_index = if shared_log.entries.is_empty() {
+            self.log_base_index.saturating_sub(1)
+        } else {
+            self.log_base_index + shared_log.entries.len() as u64 - 1
+        };
+        let new_commit = last_log_index.min(leader_commit_index);
+
+        if new_commit >= shared_log.commit_index {
+            shared_log.commit_index = new_commit;
+        }
+    }
 
     pub fn append_entry(&mut self, entry: LogEntry) -> u64 {
         let mut guard = self.inner.lock().unwrap();
@@ -108,14 +123,20 @@ impl Log {
     }
 
     pub fn increment_commit_index(&self) {
-        self.increment_atomic_commit_index();
         let mut guard = self.inner.lock().unwrap();
         guard.increment_commit_index();
+        let new_commit = guard.commit_index;
+        drop(guard);
+        self.atomic_commit_index.store(new_commit, Ordering::SeqCst);
     }
 
     pub fn increment_last_applied(&self) {
-        self.increment_atomic_last_applied();
         let mut guard = self.inner.lock().unwrap();
         guard.increment_last_applied();
+        let new_last_applied = guard.last_applied;
+        drop(guard);
+        self.atomic_last_applied
+            .store(new_last_applied, Ordering::SeqCst);
     }
 }
+

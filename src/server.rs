@@ -20,7 +20,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 struct Server {
     id: Id,
-    state_machine: StateMachine,
+    state_machine: Arc<StateMachine>,
     peers: Mutex<Vec<Arc<Peer>>>,
     listener: TcpListener,
     term: u64,
@@ -109,13 +109,19 @@ impl Server {
                 }
 
                 Role::Candidate => {
-                    self.candidate_handler(&mut rx).await;
+                    if let Err(e) = self.candidate_handler(&mut rx).await {
+                        return Err(e);
+                    };
                 }
 
-                Role::Leader => {}
+                Role::Leader => {
+                    self.leader_handler();
+                }
             }
         }
     }
+
+    async fn leader_handler(&mut self) -> Result<(), Error> {}
     async fn candidate_handler(
         &mut self,
         rx: &mut mpsc::Receiver<(u64, RPC)>,
@@ -204,9 +210,20 @@ impl Server {
         match rpc {
             RPC::AppendEntryRequest(req) => match req.entry {
                 Some(entry) => {
-                    self.state_machine.log(entry);
-                    self.last_log_term = self.term;
+                    /// Note: The state machine only records changes in the log. A separate task is required
+                    /// to synchronize this log with the state machine's persistent storage (a BTree).
+                    /// Implementation: The Raft actor (leader or follower) can send a notification via a channel
+                    /// to this dedicated storage task whenever new entries are committed (e.g., via `ready_to_apply`).
+                    /// Upon notification, the task will apply log entries up to the current commit index,
+                    /// thus updating the permanent storage.
+                    if let Some(state_machine) = Arc::get_mut(&mut self.state_machine) {
+                        state_machine.log(entry);
 
+                        let leader_commit_index = req.leader_commit;
+                        state_machine.update_commit_index(leader_commit_index);
+                        self.last_log_term =
+                            state_machine.last_log_term().unwrap_or(self.last_log_term);
+                    }
                     if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
                         peer_tx
                             .send(RPC::AppendEntryResponse(AppendEntryResponse {
@@ -281,7 +298,9 @@ impl Server {
         self.last_log_term = self.term;
     }
 }
-
+/// Task used for a communication line between a server and the different nodes. The server running
+/// on the machine talk to these different task throught channel and these channels communicate
+/// with the respective nodes by the tcp address provided.
 pub async fn peer_task(
     peer_id: u64,
     reader: OwnedReadHalf,

@@ -41,6 +41,15 @@ impl StateMachine {
             }
         }
     }
+    pub fn update_commit_index(&mut self, leader_commit_index: u64) {
+        self.log.update_commit_index(leader_commit_index);
+    }
+    pub fn last_log_term(&self) -> Option<u64> {
+        if let Some(last_log_term) = self.log.last_log_term() {
+            return Some(last_log_term);
+        }
+        None
+    }
 
     pub fn ready_to_apply(&self) -> bool {
         if self.log.atomic_commit_index.load(Ordering::Acquire)
