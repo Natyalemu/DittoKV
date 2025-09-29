@@ -91,7 +91,6 @@ impl Log {
             shared_log.commit_index = new_commit;
         }
     }
-
     pub fn commit_index(&self) -> u64 {
         let guard = self.inner.lock().unwrap();
         guard.commit_index
