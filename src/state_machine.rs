@@ -1,21 +1,23 @@
 use crate::error::Error;
-use crate::log::cmd::{Commmand, Delete};
+use crate::log::cmd::{Command, Delete, Set};
 use crate::log::log::{Log, LogEntry};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
-//1) Locks on log
-//2) If commit_index > last applied pass the command to the state machine
-//note: whether to use atomic types at the outer log or lock to check the log commit_index and
-//last_applied should be consider and benchmarked
-//
+
+// 1) Locks on log
+// 2) If commit_index > last_applied pass the command to the state machine
 pub struct StateMachine {
     log: Log,
     key_value: BTreeMap<String, String>,
 }
+
+unsafe impl Send for StateMachine {}
+unsafe impl Sync for StateMachine {}
+
 pub enum StateMachineMsg {
-    update,
-    shut_down,
+    ShutDown,
+    Append(LogEntry),
+    CommitTo(u64),
 }
 
 impl StateMachine {
@@ -25,92 +27,76 @@ impl StateMachine {
             key_value: BTreeMap::new(),
         }
     }
-    // Loop over the log to process the remaining entries
 
+    /// Apply all unapplied committed entries
     pub fn store(&mut self) {
         loop {
-            if self.log.atomic_commit_index.load(Ordering::Acquire)
-                > self.log.atomic_last_applied.load(Ordering::Acquire)
-            {
-                self.log.increment_last_applied();
-                let capacity = self.log.inner.lock().unwrap().entries.capacity() as u64;
-                let last_applied =
-                    (self.log.atomic_last_applied.load(Ordering::Acquire) % capacity) as usize;
+            // snapshot commit index and last applied
+            let (commit_idx, last_applied) = {
+                let inner = self.log.inner.lock().unwrap();
+                (inner.commit_index, inner.last_applied)
+            };
 
-                let log_entry = self.log.inner.lock().unwrap().entries[last_applied].clone();
-                self.process(log_entry);
-            }
-            if self.log.atomic_commit_index.load(Ordering::Acquire)
-                == self.log.atomic_last_applied.load(Ordering::Acquire)
-            {
+            if last_applied >= commit_idx {
                 return;
             }
-        }
-    }
-    pub async fn state_machine_update(
-        &mut self,
-        mut rx: tokio::sync::mpsc::Receiver<StateMachineMsg>,
-    ) {
-        loop {
-            let recv = match rx.recv().await {
-                Some(msg) => match msg {
-                    StateMachineMsg::update => {
-                        self.store();
-                    }
-                    StateMachineMsg::shut_down => {
-                        break;
-                    }
-                    _ => {
-                        continue;
-                    }
-                },
 
-                None => {
-                    continue;
+            let next_index = last_applied + 1;
+
+            // fetch the entry for next_index
+            let maybe_entry = {
+                let inner = self.log.inner.lock().unwrap();
+                if next_index <= self.log.log_base_index {
+                    None
+                } else {
+                    let pos = (next_index - self.log.log_base_index - 1) as usize;
+                    inner.entries.get(pos).cloned()
                 }
             };
+
+            let entry = match maybe_entry {
+                Some(e) => e,
+                None => return, // missing entry, stop until replication catches up
+            };
+
+            self.process(entry);
+
+            self.log.set_last_applied(next_index);
         }
     }
 
     pub fn update_commit_index(&mut self, leader_commit_index: u64) {
         self.log.update_commit_index(leader_commit_index);
     }
+
     pub fn last_log_term(&self) -> Option<u64> {
-        if let Some(last_log_term) = self.log.last_log_term() {
-            return Some(last_log_term);
-        }
-        None
+        self.log.last_log_term()
     }
+
     pub fn last_log_index(&self) -> Option<u64> {
-        if let Some(last_log_index) = self.log.last_log_index() {
-            return Some(last_log_index);
-        }
-        None
+        self.log.last_log_index()
     }
 
     pub fn ready_to_apply(&self) -> bool {
-        if self.log.atomic_commit_index.load(Ordering::Acquire)
+        self.log.atomic_commit_index.load(Ordering::Acquire)
             > self.log.atomic_last_applied.load(Ordering::Acquire)
-        {
-            true;
-        }
-        return false;
     }
 
-    // Consumes a LogEntry and processes the command
+    /// Apply a single log entry to the key_value state machine
     pub fn process(&mut self, log_entry: LogEntry) {
         match log_entry.command {
-            Commmand::delete(delete) => {
+            Command::Delete(delete) => {
                 self.key_value.remove(&delete.key);
             }
-            Commmand::set(set) => {
+            Command::Set(set) => {
                 self.key_value.insert(set.key, set.value);
             }
-            Commmand::None => {
-                return;
+            Command::None => {
+                // No-op
             }
         }
     }
+
     pub fn commit_index(&self) -> u64 {
         self.log.atomic_commit_index.load(Ordering::Acquire)
     }
@@ -118,27 +104,12 @@ impl StateMachine {
     pub fn log(&mut self, log_entry: LogEntry) {
         let _ = self.log.append_entry(log_entry);
     }
-    /*pub fn last_log_index(&self) -> u64 {
-        if let Some(last_log_index) = self.log.last_log_index() {
-            return last_log_index;
-        }
-        return 0;
-    }*/
-    pub fn entry_term(&self, index: u64) -> Option<u64> {
-        let guard = self.log.inner.lock().unwrap();
 
-        if index < self.log.log_base_index {
-            return None;
-        }
-        let idx = (index - self.log.log_base_index) as usize;
-        guard.entries.get(idx).map(|e| e.term)
+    pub fn entry_term(&self, index: u64) -> Option<u64> {
+        self.log.entry_term(index)
     }
+
     pub fn get_entry(&self, index: u64) -> Option<LogEntry> {
-        let guard = self.log.inner.lock().unwrap();
-        if index < self.log.log_base_index {
-            return None;
-        }
-        let idx = (index - self.log.log_base_index) as usize;
-        guard.entries.get(idx).cloned()
+        self.log.get_entry(index)
     }
 }

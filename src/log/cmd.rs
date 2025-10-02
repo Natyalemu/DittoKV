@@ -6,10 +6,10 @@ type Key = String;
 type Value = String;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum Commmand {
+pub enum Command {
     None,
-    set(Set),
-    delete(Delete),
+    Set(Set),
+    Delete(Delete),
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Set {
@@ -36,19 +36,19 @@ impl clone::Clone for Set {
         }
     }
 }
-impl Commmand {
+impl Command {
     pub fn new() -> Self {
-        Commmand::None
+        Command::None
     }
     pub fn new_set(key: impl ToString, value: impl ToString) -> Self {
-        Commmand::set(Set {
+        Command::Set(Set {
             key: key.to_string(),
             value: value.to_string(),
         })
     }
 
     pub fn new_delete(key: impl ToString) -> Self {
-        Commmand::delete(Delete {
+        Command::Delete(Delete {
             key: key.to_string(),
         })
     }
