@@ -97,7 +97,7 @@ impl Server {
                                         owned_state_machine.store();
                                     }
 
-                                    StateMachineMsg::shut_down => {
+                                    StateMachineMsg::ShutDown => {
                                         todo!()
                                     }
 
