@@ -1,3 +1,5 @@
+use std::io;
+use tokio::task::JoinError;
 pub enum Error {
     Error,
     FailedToGetTheKey,
@@ -6,4 +8,5 @@ pub enum Error {
     SendError,
     Internal(String),
     FailedToSendToStateMachine,
+    Io(io::Error),
 }

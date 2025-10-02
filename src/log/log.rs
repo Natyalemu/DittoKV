@@ -75,6 +75,15 @@ impl Log {
             atomic_last_applied: AtomicU64::new(0),
         }
     }
+    pub fn set_last_applied(&self, new_last_applied: u64) {
+        let mut inner = self.inner.lock().unwrap();
+
+        if new_last_applied > inner.last_applied {
+            inner.last_applied = new_last_applied;
+            self.atomic_last_applied
+                .store(new_last_applied, Ordering::SeqCst);
+        }
+    }
     /// Tracks the commited log by comparing the leader's commited index and the server runnning on
     /// the machine.
     pub fn update_commit_index(&mut self, leader_commit_index: u64) {

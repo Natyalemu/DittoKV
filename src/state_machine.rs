@@ -17,7 +17,6 @@ unsafe impl Send for StateMachine {}
 unsafe impl Sync for StateMachine {}
 
 pub enum StateMachineMsg {
-    update,
     shut_down,
     Append(LogEntry),
     CommitTo(u64),
@@ -34,28 +33,53 @@ impl StateMachine {
 
     pub fn store(&mut self) {
         loop {
-            if self.log.atomic_commit_index.load(Ordering::Acquire)
-                > self.log.atomic_last_applied.load(Ordering::Acquire)
-            {
-                self.log.increment_last_applied();
-                let capacity = self.log.inner.lock().unwrap().entries.capacity() as u64;
-                let last_applied =
-                    (self.log.atomic_last_applied.load(Ordering::Acquire) % capacity) as usize;
+            // 1) snapshot current commit_index and last_applied under the lock
+            let (commit_idx, last_applied) = {
+                let inner = self.log.inner.lock().unwrap();
+                (inner.commit_index, inner.last_applied)
+            };
 
-                let log_entry = self.log.inner.lock().unwrap().entries[last_applied].clone();
-                self.process(log_entry);
-            }
-            if self.log.atomic_commit_index.load(Ordering::Acquire)
-                == self.log.atomic_last_applied.load(Ordering::Acquire)
-            {
+            // nothing to do
+            if last_applied >= commit_idx {
                 return;
             }
+
+            let next_index = last_applied + 1;
+
+            // 2) try to fetch the entry for next_index
+            // we clone the entry so we can drop the lock before applying
+            let maybe_entry = {
+                let inner = self.log.inner.lock().unwrap();
+                // compute position relative to log_base_index
+                if next_index <= self.log.log_base_index {
+                    None
+                } else {
+                    let pos = (next_index - self.log.log_base_index - 1) as usize;
+                    inner.entries.get(pos).cloned()
+                }
+            };
+
+            let entry = match maybe_entry {
+                Some(e) => e,
+                None => {
+                    // The entry hasn't arrived in the log yet — stop and wait for replication.
+                    return;
+                }
+            };
+
+            // 3) apply the command to the key_value store
+            //    (we do this outside the log lock to avoid holding the mutex during application)
+            self.process(entry);
+
+            // 4) advance last_applied under the lock/atomics
+            self.log.set_last_applied(next_index);
+            // loop will continue until last_applied == commit_idx (or missing entries)
         }
     }
 
     // A message is passed through this method after a listener listens to a channel tasked with
     // listening to state machine changes
-    pub fn state_machine_update(&mut self, msg: StateMachineMsg) {
+    /* pub fn state_machine_update(&mut self, msg: StateMachineMsg) {
         match msg {
             StateMachineMsg::update => {
                 self.store();
@@ -71,7 +95,7 @@ impl StateMachine {
                 self.update_commit_index(idx);
             }
         }
-    }
+    } */
 
     pub fn update_commit_index(&mut self, leader_commit_index: u64) {
         self.log.update_commit_index(leader_commit_index);
