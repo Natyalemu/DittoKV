@@ -1,10 +1,9 @@
-use crate::log::cmd::Commmand;
+use crate::log::cmd::Command;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 use std::clone;
 use std::cmp;
 use std::collections::vec_deque;
-use std::process::Command;
 use std::sync::Arc;
 use std::{
     collections::VecDeque,
@@ -48,11 +47,11 @@ impl SharedLog {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogEntry {
     pub term: u64,
-    pub command: Commmand,
+    pub command: Command,
 }
 
 impl LogEntry {
-    pub fn new(term: u64, command: Commmand) -> Self {
+    pub fn new(term: u64, command: Command) -> Self {
         Self { term, command }
     }
 }
@@ -144,3 +143,5 @@ impl Log {
     }
 }
 
+unsafe impl Send for Log {}
+unsafe impl Sync for Log {}

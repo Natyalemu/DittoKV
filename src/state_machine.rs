@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::log::cmd::{Commmand, Delete};
+use crate::log::cmd::{Command, Delete};
 use crate::log::log::{Log, LogEntry};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -8,14 +8,19 @@ use std::sync::mpsc;
 //2) If commit_index > last applied pass the command to the state machine
 //note: whether to use atomic types at the outer log or lock to check the log commit_index and
 //last_applied should be consider and benchmarked
-//
 pub struct StateMachine {
     log: Log,
     key_value: BTreeMap<String, String>,
 }
+
+unsafe impl Send for StateMachine {}
+unsafe impl Sync for StateMachine {}
+
 pub enum StateMachineMsg {
     update,
     shut_down,
+    Append(LogEntry),
+    CommitTo(u64),
 }
 
 impl StateMachine {
@@ -47,28 +52,24 @@ impl StateMachine {
             }
         }
     }
-    pub async fn state_machine_update(
-        &mut self,
-        mut rx: tokio::sync::mpsc::Receiver<StateMachineMsg>,
-    ) {
-        loop {
-            let recv = match rx.recv().await {
-                Some(msg) => match msg {
-                    StateMachineMsg::update => {
-                        self.store();
-                    }
-                    StateMachineMsg::shut_down => {
-                        break;
-                    }
-                    _ => {
-                        continue;
-                    }
-                },
 
-                None => {
-                    continue;
-                }
-            };
+    // A message is passed through this method after a listener listens to a channel tasked with
+    // listening to state machine changes
+    pub fn state_machine_update(&mut self, msg: StateMachineMsg) {
+        match msg {
+            StateMachineMsg::update => {
+                self.store();
+            }
+            StateMachineMsg::shut_down => {
+                todo!()
+            }
+
+            StateMachineMsg::Append(entry) => {
+                self.log(entry);
+            }
+            StateMachineMsg::CommitTo(idx) => {
+                self.update_commit_index(idx);
+            }
         }
     }
 
@@ -100,13 +101,13 @@ impl StateMachine {
     // Consumes a LogEntry and processes the command
     pub fn process(&mut self, log_entry: LogEntry) {
         match log_entry.command {
-            Commmand::delete(delete) => {
+            Command::Delete(delete) => {
                 self.key_value.remove(&delete.key);
             }
-            Commmand::set(set) => {
+            Command::Set(set) => {
                 self.key_value.insert(set.key, set.value);
             }
-            Commmand::None => {
+            Command::None => {
                 return;
             }
         }

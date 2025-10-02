@@ -4,4 +4,6 @@ pub enum Error {
     FailedToSendRPC,
     ChannelClosed,
     SendError,
+    Internal(String),
+    FailedToSendToStateMachine,
 }
