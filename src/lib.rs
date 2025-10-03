@@ -1,3 +1,4 @@
+pub mod client;
 pub mod election;
 pub mod error;
 pub mod id;

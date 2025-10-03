@@ -28,10 +28,8 @@ impl StateMachine {
         }
     }
 
-    /// Apply all unapplied committed entries
     pub fn store(&mut self) {
         loop {
-            // snapshot commit index and last applied
             let (commit_idx, last_applied) = {
                 let inner = self.log.inner.lock().unwrap();
                 (inner.commit_index, inner.last_applied)
@@ -43,7 +41,6 @@ impl StateMachine {
 
             let next_index = last_applied + 1;
 
-            // fetch the entry for next_index
             let maybe_entry = {
                 let inner = self.log.inner.lock().unwrap();
                 if next_index <= self.log.log_base_index {
@@ -82,7 +79,6 @@ impl StateMachine {
             > self.log.atomic_last_applied.load(Ordering::Acquire)
     }
 
-    /// Apply a single log entry to the key_value state machine
     pub fn process(&mut self, log_entry: LogEntry) {
         match log_entry.command {
             Command::Delete(delete) => {
@@ -113,3 +109,4 @@ impl StateMachine {
         self.log.get_entry(index)
     }
 }
+

@@ -59,12 +59,12 @@ pub struct Server {
     match_index: HashMap<u64, u64>,
 
     // Channel for sending commands to the leader (from client_task)
-    cmd_to_server: mpsc::Sender<(u64, Command)>,
+    cmd_to_server: mpsc::Sender<(u64, RPC)>,
     // Channel for receiving commands from the clients.
-    rx_from_clients: Option<mpsc::Receiver<(u64, Command)>>,
+    rx_from_clients: Option<mpsc::Receiver<(u64, RPC)>>,
 
     // Channels for sending MessageToClient to update client about command status
-    tx_to_clients: HashMap<u64, mpsc::Sender<MessageToClient>>,
+    tx_to_clients: HashMap<u64, mpsc::Sender<RPC>>,
 }
 
 impl Server {
@@ -97,8 +97,7 @@ impl Server {
                                         owned_state_machine.store();
                                     }
 
-                                    StateMachineMsg::ShutDown => {
-                                        todo!()
+                                    StateMachineMsg::ShutDown => { todo!()
                                     }
 
                                 }
@@ -169,7 +168,7 @@ impl Server {
             let cloned_id = *id;
             let cmd_to_server = self.cmd_to_server.clone();
 
-            let (tx_to_client, rx_from_server) = mpsc::channel::<MessageToClient>(100);
+            let (tx_to_client, rx_from_server) = mpsc::channel::<RPC>(100);
             self.tx_to_clients.insert(cloned_id, tx_to_client);
 
             let stream = TcpStream::connect(addr).await.map_err(|e| Error::Io(e))?;
@@ -412,18 +411,42 @@ impl Server {
                     }
                 }
 
-                Some((client_id, client_cmd)) = rx_from_clients.recv() => {
-                    let entry = LogEntry {
-                        term: self.term,
-                        command: client_cmd,
-                    };
-                    let tx = match &self.tx_to_statemachine {
-                        Some(tx) => tx.clone(),
-                        None => return Err(Error::Internal("state machine channel missing".into())),
-                    };
-                    tx.send(StateMachineMsg::Append(entry)).await.map_err(|_| Error::FailedToSendToStateMachine)?;
-                    self.send_replication_round().await?;
-                }
+                Some((client_id, rpc)) = rx_from_clients.recv() => {
+                    match rpc {
+                        RPC::CommandRequest( req) =>{
+                            let client_cmd = req.command;
+                            let entry = LogEntry {
+                                term: self.term,
+                                command: client_cmd,
+                            };
+                            let tx = match &self.tx_to_statemachine {
+                                Some(tx) => tx.clone(),
+                                None => return Err(Error::Internal("state machine channel missing".into())),
+                            };
+                            tx.send(StateMachineMsg::Append(entry)).await.map_err(|_| Error::FailedToSendToStateMachine)?;
+                            self.send_replication_round().await?;
+                        },
+                        RPC::WhoIsTheLeader(req) => {
+                            let id = self.id.get_id() as u64;
+                            let resp = RPC::IAmTheLeader(
+                                IAmTheLeader{
+                                    id,}
+
+                                );
+                            if let Some(tx_to_client) = self.tx_to_clients.get(&client_id){
+                                tx_to_client.send(resp);
+
+                            }
+                            eprint!("Coudn't access server sender");
+
+
+                        },
+                        _ =>{
+                        },
+
+                    }
+
+                   }
 
                 _ = ticker.tick() => {
                     self.send_replication_round().await?;
@@ -677,8 +700,8 @@ pub async fn client_task(
     client_id: u64,
     reader: OwnedReadHalf,
     mut writer: OwnedWriteHalf,
-    cmd_to_server: mpsc::Sender<(u64, Command)>,
-    mut rx_from_server: mpsc::Receiver<MessageToClient>,
+    cmd_to_server: mpsc::Sender<(u64, RPC)>,
+    mut rx_from_server: mpsc::Receiver<RPC>,
 ) {
     let mut line = BufReader::new(reader).lines();
 
@@ -687,15 +710,15 @@ pub async fn client_task(
             line = line.next_line() => {
                 match line {
                     Ok(Some(line)) => {
-                        match serde_json::from_str::<Command>(&line) {
-                            Ok(command) => {
-                                if let Err(e) = cmd_to_server.send((client_id, command)).await {
-                                    eprintln!("Failed to send command to server: {}", e);
+                        match serde_json::from_str::<RPC>(&line) {
+                            Ok(rpc) => {
+                                if let Err(e) = cmd_to_server.send((client_id,rpc)).await {
+                                    eprintln!("Failed to send RPC to server: {}", e);
                                     break;
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Failed to parse command from client {}: {}",client_id, e);
+                                eprintln!("Failed to parse RPC from client {}: {}",client_id, e);
                             }
                         }
                     }

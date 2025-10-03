@@ -1,3 +1,4 @@
+use crate::log::cmd::Command;
 use crate::{id::Id, log::log::LogEntry};
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,25 @@ pub enum RPC {
     RequestVoteResponse(RequestVoteResponse),
     InstallSnapshotRequest(InstallSnapshotRequest),
     InstallSnapshotResponse(InstallSnapshotResponse),
+    WhoIsTheLeader(WhoIsTheLeader),
+    IAmTheLeader(IAmTheLeader),
+    CommandRequest(CommandRequest),
+    CommandResponse(CommandResponse),
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+pub struct WhoIsTheLeader {}
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+pub struct IAmTheLeader {
+    pub id: u64,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CommandRequest {
+    pub command: Command,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CommandResponse {
+    pub success: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEntryRequest {
