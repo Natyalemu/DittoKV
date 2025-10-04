@@ -21,4 +21,7 @@ impl Peer {
     pub fn get_id(self) -> u64 {
         self.id.get_id()
     }
+    pub fn id(&self) -> u64 {
+        self.id.get_id()
+    }
 }

@@ -23,6 +23,9 @@ pub struct WhoIsTheLeader {}
 pub struct IAmTheLeader {
     pub id: u64,
 }
+pub struct TheLeaderIs {
+    pub leader_id: u64,
+}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommandRequest {
     pub command: Command,
