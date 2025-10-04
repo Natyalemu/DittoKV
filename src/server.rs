@@ -1,24 +1,23 @@
 use crate::error::Error;
 use crate::id::Id;
-use crate::log::cmd::Command;
-use crate::log::log;
+use crate::log::log::LogEntry;
 use crate::peer::Peer;
 use crate::role::Role;
 use crate::rpc::RequestVoteResponse;
 use crate::rpc::RPC;
 use crate::rpc::*;
 use crate::state_machine::{StateMachine, StateMachineMsg};
-use log::LogEntry;
-use rand::Rng;
+use rand::random;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time;
-
-use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum MessageToClient {
@@ -26,7 +25,6 @@ pub enum MessageToClient {
     Failed,
 }
 
-/// Queries that ask the state machine for read-only data and expect a reply via oneshot
 pub enum StateMachineQuery {
     LastLogIndex(oneshot::Sender<Option<u64>>),
     LastLogTerm(oneshot::Sender<Option<u64>>),
@@ -35,11 +33,10 @@ pub enum StateMachineQuery {
     CommitIndex(oneshot::Sender<u64>),
 }
 
-/// Server actor (Raft node)
 pub struct Server {
     id: Id,
-    peers: tokio::sync::Mutex<Vec<std::sync::Arc<Peer>>>,
-    listener: tokio::net::TcpListener,
+    peers: Mutex<Vec<std::sync::Arc<Peer>>>,
+    listener: Arc<TcpListener>,
     term: u64,
     role: Role,
     client: HashMap<u64, String>,
@@ -47,29 +44,48 @@ pub struct Server {
     commit_index: u64,
     voted_for: Option<Id>,
 
-    /// Sender for commands to the state-machine actor (Append, Commit)
     tx_to_statemachine: Option<mpsc::Sender<StateMachineMsg>>,
-    /// Sender for queries to the state-machine actor (read-only requests)
     tx_query_statemachine: Option<mpsc::Sender<StateMachineQuery>>,
 
-    tx_to_peers: HashMap<u64, mpsc::Sender<RPC>>,
+    tx_to_peers: Arc<Mutex<HashMap<u64, mpsc::Sender<RPC>>>>,
+    tx_to_clients: Arc<Mutex<HashMap<u64, mpsc::Sender<RPC>>>>,
+
     rx_from_peers: Option<mpsc::Receiver<(u64, RPC)>>,
     tx_to_server: mpsc::Sender<(u64, RPC)>,
     next_index: HashMap<u64, u64>,
     match_index: HashMap<u64, u64>,
 
-    // Channel for sending commands to the leader (from client_task)
     cmd_to_server: mpsc::Sender<(u64, RPC)>,
-    // Channel for receiving commands from the clients.
     rx_from_clients: Option<mpsc::Receiver<(u64, RPC)>>,
-
-    // Channels for sending MessageToClient to update client about command status
-    tx_to_clients: HashMap<u64, mpsc::Sender<RPC>>,
 }
 
 impl Server {
-    pub fn new(_id: Id, _addr: String, _peers: Vec<std::sync::Arc<Peer>>) -> Self {
-        todo!()
+    pub fn new(id: Id, listener: TcpListener, peers: Vec<std::sync::Arc<Peer>>) -> Self {
+        // placeholder channels for initialization; actual receivers are set elsewhere by caller
+        let (tx_to_server, _rx) = mpsc::channel::<(u64, RPC)>(100);
+        let (cmd_to_server, _rx2) = mpsc::channel::<(u64, RPC)>(100);
+
+        Self {
+            id,
+            peers: Mutex::new(peers),
+            listener: Arc::new(listener),
+            term: 0,
+            role: Role::Follower,
+            client: HashMap::new(),
+            last_log_term: 0,
+            commit_index: 0,
+            voted_for: None,
+            tx_to_statemachine: None,
+            tx_query_statemachine: None,
+            tx_to_peers: Arc::new(Mutex::new(HashMap::new())),
+            tx_to_clients: Arc::new(Mutex::new(HashMap::new())),
+            rx_from_peers: None,
+            tx_to_server,
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+            cmd_to_server,
+            rx_from_clients: None,
+        }
     }
 
     pub async fn run(&mut self) -> Result<(), Error> {
@@ -96,15 +112,12 @@ impl Server {
                                         owned_state_machine.update_commit_index(idx);
                                         owned_state_machine.store();
                                     }
-
-                                    StateMachineMsg::ShutDown => { todo!()
+                                    StateMachineMsg::ShutDown => {
+                                        break;
                                     }
-
                                 }
                             }
-                            None => {
-                                break;
-                            }
+                            None => break,
                         }
                     }
 
@@ -129,9 +142,7 @@ impl Server {
                                     }
                                 }
                             }
-                            None => {
-                                break;
-                            }
+                            None => break,
                         }
                     }
                 }
@@ -143,24 +154,66 @@ impl Server {
             .take()
             .expect("rx_from_peers must be Some when run() is called");
 
+        let listener = Arc::clone(&self.listener);
+        let tx_to_peers_for_accept = Arc::clone(&self.tx_to_peers);
+        let tx_to_clients_for_accept = Arc::clone(&self.tx_to_clients);
+        let tx_to_server_for_accept = self.tx_to_server.clone();
+        let cmd_to_server_for_accept = self.cmd_to_server.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _addr)) => {
+                        let tx_to_peers_inner = Arc::clone(&tx_to_peers_for_accept);
+                        let tx_to_clients_inner = Arc::clone(&tx_to_clients_for_accept);
+                        let tx_to_server_inner = tx_to_server_for_accept.clone();
+                        let cmd_to_server_inner = cmd_to_server_for_accept.clone();
+                        tokio::spawn(async move {
+                            let _ = accept_handshake_and_spawn(
+                                stream,
+                                tx_to_peers_inner,
+                                tx_to_clients_inner,
+                                tx_to_server_inner,
+                                cmd_to_server_inner,
+                            )
+                            .await;
+                        });
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
+
+        // dial out to known peers (if any)
         let peers_to_connect: Vec<std::sync::Arc<Peer>> = {
             let guard = self.peers.lock().await;
             guard.iter().cloned().collect()
         };
 
+        let tx_to_peers_for_dial = Arc::clone(&self.tx_to_peers);
+        let tx_to_clients_for_dial = Arc::clone(&self.tx_to_clients);
+        let tx_to_server_for_dial = self.tx_to_server.clone();
+        let cmd_to_server_for_dial = self.cmd_to_server.clone();
+        let our_id = self.id.get_id();
+
         for peer in peers_to_connect {
             let addr = peer.addr.clone();
-            let peer_id = peer.id.clone().get_id();
-            let tx_to_server = self.tx_to_server.clone();
-
-            let (tx_to_peer, rx_from_server) = mpsc::channel::<RPC>(100);
-            self.tx_to_peers.insert(peer_id, tx_to_peer);
-
-            let stream = TcpStream::connect(addr).await.map_err(|e| Error::Io(e))?;
-            let (reader, writer) = stream.into_split();
-
+            let tx_to_peers_map = Arc::clone(&tx_to_peers_for_dial);
+            let tx_to_clients_map = Arc::clone(&tx_to_clients_for_dial);
+            let tx_to_server = tx_to_server_for_dial.clone();
+            let cmd_to_server = cmd_to_server_for_dial.clone();
             tokio::spawn(async move {
-                peer_task(peer_id, reader, writer, tx_to_server, rx_from_server).await;
+                if let Ok(stream) = TcpStream::connect(addr).await {
+                    let _ = dial_handshake_and_spawn(
+                        stream,
+                        our_id,
+                        tx_to_peers_map,
+                        tx_to_clients_map,
+                        tx_to_server,
+                        cmd_to_server,
+                    )
+                    .await;
+                }
             });
         }
 
@@ -169,12 +222,16 @@ impl Server {
             let cmd_to_server = self.cmd_to_server.clone();
 
             let (tx_to_client, rx_from_server) = mpsc::channel::<RPC>(100);
-            self.tx_to_clients.insert(cloned_id, tx_to_client);
+            {
+                let mut cmap = self.tx_to_clients.lock().await;
+                cmap.insert(cloned_id, tx_to_client);
+            }
 
             let stream = TcpStream::connect(addr).await.map_err(|e| Error::Io(e))?;
             let (reader, writer) = stream.into_split();
+            let buf_reader = BufReader::new(reader);
             tokio::spawn(async move {
-                client_task(cloned_id, reader, writer, cmd_to_server, rx_from_server).await;
+                client_task(cloned_id, buf_reader, writer, cmd_to_server, rx_from_server).await;
             });
         }
 
@@ -228,7 +285,8 @@ impl Server {
             .into_iter()
             .collect::<HashMap<u64, u64>>();
 
-        for &peer_id in self.tx_to_peers.keys() {
+        let map = self.tx_to_peers.lock().await;
+        for &peer_id in map.keys() {
             self.next_index.insert(peer_id, last_index + 1);
             self.match_index.insert(peer_id, 0);
         }
@@ -269,7 +327,10 @@ impl Server {
 
         match_indexes.sort_unstable_by(|a, b| b.cmp(a));
 
-        let cluster_size = self.tx_to_peers.len() + 1;
+        let cluster_size = {
+            let map = self.tx_to_peers.lock().await;
+            map.len() + 1
+        };
         let majority = (cluster_size / 2) + 1;
         if majority == 0 || majority > match_indexes.len() {
             return Ok(());
@@ -296,10 +357,10 @@ impl Server {
         let prev_log_index = self.sm_last_log_index().await?.unwrap_or(0);
         let prev_log_term = self.sm_last_log_term().await?.unwrap_or(0);
 
-        let mut work: Vec<(u64, mpsc::Sender<RPC>)> = Vec::with_capacity(self.tx_to_peers.len());
-        for (&pid, tx) in &self.tx_to_peers {
-            work.push((pid, tx.clone()));
-        }
+        let work: Vec<(u64, mpsc::Sender<RPC>)> = {
+            let map = self.tx_to_peers.lock().await;
+            map.iter().map(|(&k, v)| (k, v.clone())).collect()
+        };
 
         for (pid, tx) in work {
             let next_idx = *self.next_index.get(&pid).unwrap_or(&1);
@@ -371,7 +432,8 @@ impl Server {
                                         let ni = self.next_index.entry(peer_id).or_insert(1);
                                         if *ni > 1 { *ni -= 1; } else { *ni = 1; }
 
-                                        if let Some(tx) = self.tx_to_peers.get(&peer_id) {
+                                        let map = self.tx_to_peers.lock().await;
+                                        if let Some(tx) = map.get(&peer_id) {
                                             if let Some(req) = self.build_append_for_peer(peer_id).await? {
                                                 let _ = tx.send(RPC::AppendEntryRequest(req)).await;
                                             }
@@ -386,7 +448,8 @@ impl Server {
                                         self.role = Role::Follower;
                                         return Ok(());
                                     } else {
-                                        if let Some(tx) = self.tx_to_peers.get(&peer_id) {
+                                        let map = self.tx_to_peers.lock().await;
+                                        if let Some(tx) = map.get(&peer_id) {
                                             let _ = tx.send(RPC::RequestVoteResponse(RequestVoteResponse {
                                                 term: self.term,
                                                 vote_granted: false,
@@ -413,9 +476,9 @@ impl Server {
 
                 Some((client_id, rpc)) = rx_from_clients.recv() => {
                     match rpc {
-                        RPC::CommandRequest( req) =>{
+                        RPC::CommandRequest(req) => {
                             let client_cmd = req.command;
-                            let entry = LogEntry {
+                            let entry = crate::log::log::LogEntry {
                                 term: self.term,
                                 command: client_cmd,
                             };
@@ -425,28 +488,18 @@ impl Server {
                             };
                             tx.send(StateMachineMsg::Append(entry)).await.map_err(|_| Error::FailedToSendToStateMachine)?;
                             self.send_replication_round().await?;
-                        },
-                        RPC::WhoIsTheLeader(req) => {
+                        }
+                        RPC::WhoIsTheLeader(_) => {
                             let id = self.id.get_id() as u64;
-                            let resp = RPC::IAmTheLeader(
-                                IAmTheLeader{
-                                    id,}
-
-                                );
-                            if let Some(tx_to_client) = self.tx_to_clients.get(&client_id){
-                                tx_to_client.send(resp);
-
+                            let resp = RPC::IAmTheLeader(IAmTheLeader { id });
+                            let map = self.tx_to_clients.lock().await;
+                            if let Some(tx_to_client) = map.get(&client_id) {
+                                let _ = tx_to_client.send(resp).await;
                             }
-                            eprint!("Coudn't access server sender");
-
-
-                        },
-                        _ =>{
-                        },
-
+                        }
+                        _ => {}
                     }
-
-                   }
+                }
 
                 _ = ticker.tick() => {
                     self.send_replication_round().await?;
@@ -460,7 +513,10 @@ impl Server {
         rx: &mut mpsc::Receiver<(u64, RPC)>,
     ) -> Result<(), Error> {
         loop {
-            let majority = (self.tx_to_peers.len() / 2) + 1;
+            let majority = {
+                let map = self.tx_to_peers.lock().await;
+                (map.len() / 2) + 1
+            };
             self.term += 1;
             self.voted_for = Some(self.id);
             let mut votes: usize = 1;
@@ -472,11 +528,13 @@ impl Server {
                 last_log_index: self.sm_last_log_index().await?.unwrap_or(0),
             };
 
-            for (_, sender) in &self.tx_to_peers {
+            let map = self.tx_to_peers.lock().await;
+            for (_, sender) in map.iter() {
                 let _ = sender
                     .send(RPC::RequestVoteRequest(request_vote_request.clone()))
                     .await;
             }
+            drop(map);
 
             let mut timeout = tokio::time::sleep(self.random_election_timeout_duration());
             tokio::pin!(timeout);
@@ -525,8 +583,9 @@ impl Server {
     }
 
     fn random_election_timeout_duration(&self) -> Duration {
-        let ms = rand::thread_rng().gen_range(150..=300);
-        Duration::from_millis(ms)
+        // use rand::random for simplicity
+        let v: u64 = (random::<u64>() % 151) + 150; // range 150..=300
+        Duration::from_millis(v)
     }
 
     pub async fn handle_follower(&mut self, peer_id: u64, rpc: RPC) -> Result<(), Error> {
@@ -544,7 +603,8 @@ impl Server {
                         return Err(Error::Internal("state machine channel missing".into()));
                     }
 
-                    if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
+                    let map = self.tx_to_peers.lock().await;
+                    if let Some(peer_tx) = map.get(&peer_id) {
                         peer_tx
                             .send(RPC::AppendEntryResponse(AppendEntryResponse {
                                 term: self.term,
@@ -600,7 +660,8 @@ impl Server {
             }
         };
 
-        if let Some(peer_tx) = self.tx_to_peers.get(&peer_id) {
+        let map = self.tx_to_peers.lock().await;
+        if let Some(peer_tx) = map.get(&peer_id) {
             let response = RPC::RequestVoteResponse(RequestVoteResponse {
                 term: self.term,
                 vote_granted,
@@ -696,70 +757,108 @@ impl Server {
     }
 }
 
+async fn accept_handshake_and_spawn(
+    stream: TcpStream,
+    tx_to_peers: Arc<Mutex<HashMap<u64, mpsc::Sender<RPC>>>>,
+    tx_to_clients: Arc<Mutex<HashMap<u64, mpsc::Sender<RPC>>>>,
+    tx_to_server: mpsc::Sender<(u64, RPC)>,
+    cmd_to_server: mpsc::Sender<(u64, RPC)>,
+) -> Result<(), ()> {
+    let (reader, writer) = stream.into_split();
+    let mut buf_reader = BufReader::new(reader);
+
+    let mut first_line = String::new();
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        buf_reader.read_line(&mut first_line),
+    )
+    .await
+    {
+        Ok(Ok(n)) => {
+            if n == 0 {
+                return Err(());
+            }
+        }
+        _ => return Err(()),
+    }
+
+    let v: Value = serde_json::from_str(first_line.trim()).map_err(|_| ())?;
+    let kind = v.get("type").and_then(|t| t.as_str()).ok_or(())?;
+
+    match kind {
+        "node" => {
+            let peer_id = v.get("id").and_then(|x| x.as_u64()).ok_or(())? as u64;
+            let (tx_to_peer, rx_from_server) = mpsc::channel::<RPC>(100);
+            {
+                let mut map = tx_to_peers.lock().await;
+                map.insert(peer_id, tx_to_peer.clone());
+            }
+            tokio::spawn(async move {
+                peer_task(peer_id, buf_reader, writer, tx_to_server, rx_from_server).await;
+            });
+            Ok(())
+        }
+        "client" => {
+            let client_id = v
+                .get("client_id")
+                .and_then(|x| x.as_u64())
+                .unwrap_or_else(|| random::<u64>()) as u64;
+            let (tx_to_client, rx_from_server) = mpsc::channel::<RPC>(100);
+            {
+                let mut cmap = tx_to_clients.lock().await;
+                cmap.insert(client_id, tx_to_client.clone());
+            }
+            tokio::spawn(async move {
+                client_task(client_id, buf_reader, writer, cmd_to_server, rx_from_server).await;
+            });
+            Ok(())
+        }
+        _ => Err(()),
+    }
+}
+
+async fn dial_handshake_and_spawn(
+    stream: TcpStream,
+    our_id: u64,
+    tx_to_peers: Arc<Mutex<HashMap<u64, mpsc::Sender<RPC>>>>,
+    tx_to_clients: Arc<Mutex<HashMap<u64, mpsc::Sender<RPC>>>>,
+    tx_to_server: mpsc::Sender<(u64, RPC)>,
+    cmd_to_server: mpsc::Sender<(u64, RPC)>,
+) -> Result<(), ()> {
+    let (reader, mut writer) = stream.into_split();
+    let buf_reader = BufReader::new(reader);
+
+    let identify = serde_json::json!({ "type":"node", "id": our_id });
+    let serialized = serde_json::to_string(&identify).map_err(|_| ())?;
+    writer
+        .write_all(serialized.as_bytes())
+        .await
+        .map_err(|_| ())?;
+    writer.write_all(b"\n").await.map_err(|_| ())?;
+
+    let peer_id = random::<u64>();
+
+    let (tx_to_peer, rx_from_server) = mpsc::channel::<RPC>(100);
+    {
+        let mut map = tx_to_peers.lock().await;
+        map.insert(peer_id, tx_to_peer.clone());
+    }
+
+    tokio::spawn(async move {
+        peer_task(peer_id, buf_reader, writer, tx_to_server, rx_from_server).await;
+    });
+
+    Ok(())
+}
+
 pub async fn client_task(
     client_id: u64,
-    reader: OwnedReadHalf,
+    reader: BufReader<OwnedReadHalf>,
     mut writer: OwnedWriteHalf,
     cmd_to_server: mpsc::Sender<(u64, RPC)>,
     mut rx_from_server: mpsc::Receiver<RPC>,
 ) {
-    let mut line = BufReader::new(reader).lines();
-
-    loop {
-        tokio::select! {
-            line = line.next_line() => {
-                match line {
-                    Ok(Some(line)) => {
-                        match serde_json::from_str::<RPC>(&line) {
-                            Ok(rpc) => {
-                                if let Err(e) = cmd_to_server.send((client_id,rpc)).await {
-                                    eprintln!("Failed to send RPC to server: {}", e);
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to parse RPC from client {}: {}",client_id, e);
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        println!("client {} disconnected", client_id);
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading from client {}: {}", client_id, e);
-                        break;
-                    }
-                }
-            }
-
-            Some(msg) = rx_from_server.recv() => {
-                match serde_json::to_string(&msg) {
-                    Ok(serialized) => {
-                        if let Err(e) = writer.write_all(serialized.as_bytes()).await {
-                            eprintln!("Failed to write to client {}: {}", client_id, e);
-                            break;
-                        }
-                        if let Err(e) = writer.write_all(b"\n").await {
-                            eprintln!("Failed to write newline to client {}: {}", client_id, e);
-                            break;
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to serialize RPC for client {}: {}", client_id, e),
-                }
-            }
-        }
-    }
-}
-
-pub async fn peer_task(
-    peer_id: u64,
-    reader: OwnedReadHalf,
-    mut writer: OwnedWriteHalf,
-    tx_to_server: mpsc::Sender<(u64, RPC)>,
-    mut rx_from_server: mpsc::Receiver<RPC>,
-) {
-    let mut lines = BufReader::new(reader).lines();
+    let mut lines = reader.lines();
 
     loop {
         tokio::select! {
@@ -768,44 +867,66 @@ pub async fn peer_task(
                     Ok(Some(line)) => {
                         match serde_json::from_str::<RPC>(&line) {
                             Ok(rpc) => {
-                                if let Err(e) = tx_to_server.send((peer_id, rpc)).await {
-                                    eprintln!("Failed to send RPC to server: {}", e);
+                                if cmd_to_server.send((client_id, rpc)).await.is_err() {
                                     break;
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("Failed to parse RPC from peer {}: {}", peer_id, e);
-                            }
+                            Err(_) => {}
                         }
                     }
-                    Ok(None) => {
-                        println!("Peer {} disconnected", peer_id);
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading from peer {}: {}", peer_id, e);
-                        break;
-                    }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
 
             Some(msg) = rx_from_server.recv() => {
                 match serde_json::to_string(&msg) {
                     Ok(serialized) => {
-                        if let Err(e) = writer.write_all(serialized.as_bytes()).await {
-                            eprintln!("Failed to write to peer {}: {}", peer_id, e);
-                            break;
-                        }
-                        if let Err(e) = writer.write_all(b"\n").await {
-                            eprintln!("Failed to write newline to peer {}: {}", peer_id, e);
-                            break;
-                        }
+                        if writer.write_all(serialized.as_bytes()).await.is_err() { break; }
+                        if writer.write_all(b"\n").await.is_err() { break; }
                     }
-                    Err(e) => eprintln!("Failed to serialize RPC for peer {}: {}", peer_id, e),
+                    Err(_) => {}
                 }
             }
         }
     }
+}
 
-    println!("Peer task {} exiting", peer_id);
+pub async fn peer_task(
+    peer_id: u64,
+    reader: BufReader<OwnedReadHalf>,
+    mut writer: OwnedWriteHalf,
+    tx_to_server: mpsc::Sender<(u64, RPC)>,
+    mut rx_from_server: mpsc::Receiver<RPC>,
+) {
+    let mut lines = reader.lines();
+
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                match line {
+                    Ok(Some(line)) => {
+                        match serde_json::from_str::<RPC>(&line) {
+                            Ok(rpc) => {
+                                if tx_to_server.send((peer_id, rpc)).await.is_err() { break; }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+
+            Some(msg) = rx_from_server.recv() => {
+                match serde_json::to_string(&msg) {
+                    Ok(serialized) => {
+                        if writer.write_all(serialized.as_bytes()).await.is_err() { break; }
+                        if writer.write_all(b"\n").await.is_err() { break; }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
 }
