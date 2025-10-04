@@ -11,9 +11,6 @@ pub struct StateMachine {
     key_value: BTreeMap<String, String>,
 }
 
-unsafe impl Send for StateMachine {}
-unsafe impl Sync for StateMachine {}
-
 pub enum StateMachineMsg {
     ShutDown,
     Append(LogEntry),

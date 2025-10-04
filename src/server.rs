@@ -8,7 +8,7 @@ use crate::rpc::RequestVoteResponse;
 use crate::rpc::RPC;
 use crate::rpc::*;
 use crate::state_machine::{StateMachine, StateMachineMsg};
-use log::LogEntry;
+use crate::log::log::LogEntry;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -426,20 +426,16 @@ impl Server {
                             tx.send(StateMachineMsg::Append(entry)).await.map_err(|_| Error::FailedToSendToStateMachine)?;
                             self.send_replication_round().await?;
                         },
-                        RPC::WhoIsTheLeader(req) => {
-                            let id = self.id.get_id() as u64;
-                            let resp = RPC::IAmTheLeader(
-                                IAmTheLeader{
-                                    id,}
-
-                                );
-                            if let Some(tx_to_client) = self.tx_to_clients.get(&client_id){
-                                tx_to_client.send(resp);
-
+                        RPC::WhoIsTheLeader(_) => {
+                            let id = self.id.get_id();
+                            let resp = RPC::IAmTheLeader(IAmTheLeader { id });
+                            if let Some(tx_to_client) = self.tx_to_clients.get(&client_id) {
+                                if let Err(_e) = tx_to_client.send(resp).await {
+                                    eprintln!("Failed to notify client {} about leader", client_id);
+                                }
+                            } else {
+                                eprintln!("Couldn't access client sender for {}", client_id);
                             }
-                            eprint!("Coudn't access server sender");
-
-
                         },
                         _ =>{
                         },
