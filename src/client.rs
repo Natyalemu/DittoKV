@@ -1,8 +1,8 @@
 //Raft's client
 use crate::error::Error;
-use crate::log::cmd::Command;
+use crate::log::cmd::{Command, Set};
 use crate::peer::Peer;
-use crate::rpc::RPC;
+use crate::rpc::{CommandRequest, RPC};
 use crate::rpc::{IAmTheLeader, WhoIsTheLeader};
 use serde_json;
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub async fn new(nodes: Vec<Peer>) -> Result<Self, Error> {
+    pub async fn new(nodes: Vec<Peer>, id: u64) -> Result<Self, Error> {
         let (tx_to_client, rx_from_nodes) = mpsc::channel::<RPC>(256);
         let mut tx_to_nodes: HashMap<u64, mpsc::Sender<RPC>> = HashMap::new();
         let mut discovered_leader: Option<u64> = None;
@@ -40,7 +40,7 @@ impl RaftClient {
             let mut reader = BufReader::new(read_half);
             let mut writer = write_half;
 
-            let client_id: u64 = rand::random();
+            let client_id: u64 = id;
             let hello = serde_json::json!({
                 "type": "client",
                 "client_id": client_id,
@@ -83,47 +83,12 @@ impl RaftClient {
                 }
             }
 
-            let (tx_to_node, mut rx_for_writer) = mpsc::channel::<RPC>(256);
+            let (tx_to_node, mut rx_from_client) = mpsc::channel::<RPC>(256);
             let tx_to_client_clone = tx_to_client.clone();
-            let mut reader_for_task = reader;
-            let mut writer_for_task: OwnedWriteHalf = writer;
 
             tokio::spawn(async move {
-                while let Some(rpc) = rx_for_writer.recv().await {
-                    match serde_json::to_string(&rpc) {
-                        Ok(s) => {
-                            if writer_for_task.write_all(s.as_bytes()).await.is_err() {
-                                break;
-                            }
-                            if writer_for_task.write_all(b"\n").await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            tokio::spawn(async move {
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader_for_task.read_line(&mut line).await {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            match serde_json::from_str::<RPC>(line.trim()) {
-                                Ok(rpc) => {
-                                    let _ = tx_to_client_clone.send(rpc).await;
-                                }
-                                Err(_) => continue,
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
+                peer_task_handler(node_id, tx_to_client_clone, rx_from_client, writer, reader)
+                    .await;
             });
 
             tx_to_nodes.insert(node_id, tx_to_node);
@@ -137,13 +102,35 @@ impl RaftClient {
             rx_from_nodes,
         })
     }
+    pub async fn set(&self, key: String, value: String) -> Result<(), Error> {
+        let command = Command::Set(Set { key, value });
+        let rpc = RPC::CommandRequest(CommandRequest { command });
+        if let Err(e) = serde_json::to_string(&rpc) {
+            eprintln!("failed to serialize command to rpc");
+        }
+
+        let leader_id = self.leader.unwrap().clone();
+        let tx_to_leader = match self.tx_to_nodes.get(&leader_id) {
+            Some(tx) => tx,
+            None => {
+                eprintln!("failed to access sender to leader");
+                return Err(Error::NoLeader);
+            }
+        };
+
+        if let Err(e) = tx_to_leader.send(rpc).await {
+            eprintln!("client failed to send to task handler");
+        }
+
+        Ok(())
+    }
 }
 pub async fn peer_task_handler(
     node_id: u64,
     tx_to_client: mpsc::Sender<RPC>,
     mut rx_from_client: mpsc::Receiver<RPC>,
     mut writer: OwnedWriteHalf,
-    reader: OwnedReadHalf,
+    reader: BufReader<OwnedReadHalf>,
 ) {
     let mut line = BufReader::new(reader).lines();
 

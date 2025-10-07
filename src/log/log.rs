@@ -31,7 +31,14 @@ impl SharedLog {
         }
     }
 
-    pub fn push_back(&mut self, entry: LogEntry) {
+    pub fn push_back(&mut self, entry: LogEntry, id: u64) {
+        let entry2 = entry.clone();
+        let command = entry2.command;
+        match command {
+            Command::Set(set) => eprintln!("entry value is{} for {}", set.value, id),
+            _ => {}
+        }
+
         self.entries.push_back(entry);
     }
 
@@ -59,9 +66,9 @@ impl Log {
         }
     }
 
-    pub fn append_entry(&self, entry: LogEntry) -> u64 {
+    pub fn append_entry(&self, entry: LogEntry, id: u64) -> u64 {
         let mut guard = self.inner.lock().unwrap();
-        guard.push_back(entry);
+        guard.push_back(entry, id);
         let last_index = self.log_base_index + guard.entries.len() as u64;
         last_index
     }
