@@ -97,8 +97,8 @@ impl StateMachine {
         self.log.atomic_commit_index.load(Ordering::Acquire)
     }
 
-    pub fn log(&mut self, log_entry: LogEntry) {
-        let _ = self.log.append_entry(log_entry);
+    pub fn log(&mut self, log_entry: LogEntry, id: u64) {
+        let _ = self.log.append_entry(log_entry, id);
     }
 
     pub fn entry_term(&self, index: u64) -> Option<u64> {
@@ -109,4 +109,3 @@ impl StateMachine {
         self.log.get_entry(index)
     }
 }
-

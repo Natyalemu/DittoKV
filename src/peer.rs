@@ -8,7 +8,7 @@ pub struct Peer {
     pub addr: String,
 }
 impl Peer {
-    pub fn new(id: Id, stream: TcpStream, addr: String) -> Self {
+    pub fn new(id: Id, addr: String) -> Self {
         Self { id, addr }
     }
     //This method implements the behavior of a follower server by monitoring incoming RPC messages

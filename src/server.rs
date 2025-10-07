@@ -33,7 +33,7 @@ pub enum StateMachineQuery {
     CommitIndex(oneshot::Sender<u64>),
 }
 
-pub struct Server {
+pub struct RaftServer {
     id: Id,
     peers: Mutex<Vec<std::sync::Arc<Peer>>>,
     listener: Arc<TcpListener>,
@@ -59,18 +59,23 @@ pub struct Server {
     rx_from_clients: Option<mpsc::Receiver<(u64, RPC)>>,
 }
 
-impl Server {
-    pub fn new(id: Id, listener: TcpListener, peers: Vec<std::sync::Arc<Peer>>) -> Self {
+impl RaftServer {
+    pub fn new(
+        id: Id,
+        listener: TcpListener,
+        peers: Vec<std::sync::Arc<Peer>>,
+        role: Role,
+    ) -> Self {
         // placeholder channels for initialization; actual receivers are set elsewhere by caller
-        let (tx_to_server, _rx) = mpsc::channel::<(u64, RPC)>(100);
-        let (cmd_to_server, _rx2) = mpsc::channel::<(u64, RPC)>(100);
+        let (tx_to_server, rx_from_peers) = mpsc::channel::<(u64, RPC)>(100);
+        let (cmd_to_server, rx_from_clients) = mpsc::channel::<(u64, RPC)>(100);
 
         Self {
             id,
             peers: Mutex::new(peers),
             listener: Arc::new(listener),
             term: 0,
-            role: Role::Follower,
+            role: role,
             client: HashMap::new(),
             last_log_term: 0,
             commit_index: 0,
@@ -79,12 +84,12 @@ impl Server {
             tx_query_statemachine: None,
             tx_to_peers: Arc::new(Mutex::new(HashMap::new())),
             tx_to_clients: Arc::new(Mutex::new(HashMap::new())),
-            rx_from_peers: None,
+            rx_from_peers: Some(rx_from_peers),
             tx_to_server,
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             cmd_to_server,
-            rx_from_clients: None,
+            rx_from_clients: Some(rx_from_clients),
         }
     }
 
@@ -98,6 +103,7 @@ impl Server {
         let mut owned_state_machine = StateMachine::new();
 
         let mut rx_from_log = rx_from_log;
+        let server_id = self.id.get_id().clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -106,7 +112,8 @@ impl Server {
                             Some(cmd) => {
                                 match cmd {
                                     StateMachineMsg::Append(entry) => {
-                                        owned_state_machine.log(entry);
+                                        let cloned_server_id = server_id.clone();
+                                        owned_state_machine.log(entry,cloned_server_id);
                                     }
                                     StateMachineMsg::CommitTo(idx) => {
                                         owned_state_machine.update_commit_index(idx);
@@ -144,7 +151,10 @@ impl Server {
                             }
                             None => break,
                         }
+
                     }
+
+
                 }
             }
         });

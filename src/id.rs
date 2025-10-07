@@ -8,7 +8,7 @@ use crate::error::Error;
 pub struct Id(u64);
 
 impl Id {
-    pub fn new(id: impl Into<u64>) -> Self {
+    pub fn new(id: u64) -> Self {
         let id = id.into();
         Id(id)
     }
